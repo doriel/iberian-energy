@@ -1,12 +1,137 @@
-"""Placeholder web service.
+"""Web service, with the Databricks sign in flow wired up end to end.
 
-Exists so the deployment target has a real URL and a health check before the
-read models it will serve are in place.
+The workspace issues OAuth app integrations rather than service principal
+secrets, so this app cannot authenticate as itself. It authenticates as
+whoever signs in, using the authorization code flow, and the token it gets
+back carries that person's own permissions.
+
+The consequence is worth stating plainly rather than discovering later: only
+someone with an account in this Databricks workspace can use anything behind
+the sign in. Pages meant for a manufacturer or a journalist have to be served
+from published data instead.
+
+Routes:
+    /           status, and a link to start the flow
+    /login      redirect to Databricks
+    /callback   exchange the code for a token and report what came back
+    /healthz    liveness, no auth
+
+Configuration, all from the environment:
+    DATABRICKS_HOST           https://dbc-xxxxxxxx-xxxx.cloud.databricks.com
+    DATABRICKS_CLIENT_ID      from the app integration
+    DATABRICKS_CLIENT_SECRET  from the app integration
+    DATABRICKS_REDIRECT_URI   must match a registered redirect URL exactly
+    DATABRICKS_SCOPES         space separated, defaults to "postgres"
 """
 
-from fastapi import FastAPI
+from __future__ import annotations
+
+import base64
+import hashlib
+import html
+import json
+import os
+import secrets
+import time
+import urllib.parse
+from datetime import datetime, timezone
+
+import requests
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 app = FastAPI(title="MIBEL Market Intelligence")
+
+HOST = (os.environ.get("DATABRICKS_HOST") or "").rstrip("/")
+CLIENT_ID = os.environ.get("DATABRICKS_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
+REDIRECT_URI = os.environ.get("DATABRICKS_REDIRECT_URI", "")
+SCOPES = os.environ.get("DATABRICKS_SCOPES", "postgres")
+
+AUTHORIZE_URL = f"{HOST}/oidc/v1/authorize"
+TOKEN_URL = f"{HOST}/oidc/v1/token"
+
+# One pending sign in per state value. The flow is short lived and this app
+# runs as a single instance, so a dict is enough. Anything longer lived would
+# need a real session store, which is a problem for the day there is one.
+_PENDING: dict[str, dict] = {}
+_PENDING_TTL_SECONDS = 600
+_PENDING_MAX = 50
+
+
+def configured() -> list[str]:
+    """Which required settings are missing, so the page can say so."""
+    return [
+        name
+        for name, value in (
+            ("DATABRICKS_HOST", HOST),
+            ("DATABRICKS_CLIENT_ID", CLIENT_ID),
+            ("DATABRICKS_CLIENT_SECRET", CLIENT_SECRET),
+            ("DATABRICKS_REDIRECT_URI", REDIRECT_URI),
+        )
+        if not value
+    ]
+
+
+def _prune() -> None:
+    cutoff = time.time() - _PENDING_TTL_SECONDS
+    for state in [s for s, v in _PENDING.items() if v["created"] < cutoff]:
+        _PENDING.pop(state, None)
+    while len(_PENDING) > _PENDING_MAX:
+        _PENDING.pop(next(iter(_PENDING)))
+
+
+def _pkce() -> tuple[str, str]:
+    """Verifier and S256 challenge.
+
+    The workspace advertises S256 as its only challenge method, so send it
+    even though a confidential client does not strictly need PKCE.
+    """
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).decode().rstrip("=")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return verifier, challenge
+
+
+def decode_claims(token: str) -> dict:
+    """Read a JWT payload without verifying the signature.
+
+    Verification is the resource server's job. This is here so a human can see
+    which identity the token belongs to and which scopes actually came back,
+    which is often narrower than what was requested.
+    """
+    try:
+        payload = token.split(".")[1]
+    except IndexError:
+        return {}
+    padding = "=" * (-len(payload) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload + padding))
+    except Exception:
+        return {}
+
+
+def page(title: str, body: str) -> HTMLResponse:
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font: 16px/1.6 ui-sans-serif, system-ui, sans-serif;
+         max-width: 44rem; margin: 3rem auto; padding: 0 1rem; }}
+  code, pre {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+              font-size: 0.9em; }}
+  pre {{ padding: 1rem; overflow-x: auto; border-radius: 6px;
+        background: rgba(127,127,127,0.12); }}
+  .ok {{ color: #16794a; }} .bad {{ color: #b3261e; }}
+  @media (prefers-color-scheme: dark) {{ .ok {{ color: #6ee7a8; }}
+                                         .bad {{ color: #ff938a; }} }}
+  table {{ border-collapse: collapse; }}
+  td {{ padding: 0.2rem 1.2rem 0.2rem 0; vertical-align: top; }}
+</style></head><body>{body}</body></html>"""
+    )
 
 
 @app.get("/healthz")
@@ -14,6 +139,146 @@ def healthz():
     return {"status": "ok"}
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def index():
-    return {"service": "mibel-market-intelligence", "status": "placeholder"}
+    missing = configured()
+    if missing:
+        rows = "".join(f"<li><code>{html.escape(m)}</code></li>" for m in missing)
+        return page(
+            "MIBEL Market Intelligence",
+            "<h1>MIBEL Market Intelligence</h1>"
+            '<p class="bad">Not configured. Missing environment variables:</p>'
+            f"<ul>{rows}</ul>",
+        )
+    return page(
+        "MIBEL Market Intelligence",
+        "<h1>MIBEL Market Intelligence</h1>"
+        "<p>Detects price decoupling between Portugal and Spain in the MIBEL "
+        "day ahead market.</p>"
+        f"<p>Workspace: <code>{html.escape(HOST)}</code><br>"
+        f"Scopes requested: <code>{html.escape(SCOPES)}</code></p>"
+        '<p><a href="/login">Sign in with Databricks</a></p>'
+        "<p><small>Sign in requires an account in that workspace.</small></p>",
+    )
+
+
+@app.get("/login")
+def login():
+    missing = configured()
+    if missing:
+        raise HTTPException(500, f"Not configured: {', '.join(missing)}")
+
+    _prune()
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = _pkce()
+    _PENDING[state] = {"verifier": verifier, "created": time.time()}
+
+    query = urllib.parse.urlencode(
+        {
+            "client_id": CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "scope": SCOPES,
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+    )
+    return RedirectResponse(f"{AUTHORIZE_URL}?{query}", status_code=302)
+
+
+@app.get("/callback", response_class=HTMLResponse)
+def callback(
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    error_description: str | None = Query(default=None),
+):
+    if error:
+        return page(
+            "Sign in failed",
+            '<h1 class="bad">Databricks refused the request</h1>'
+            f"<pre>{html.escape(error)}\n"
+            f"{html.escape(error_description or '')}</pre>"
+            '<p><a href="/">Back</a></p>',
+        )
+
+    if not code or not state:
+        return page(
+            "Sign in failed",
+            '<h1 class="bad">No code returned</h1>'
+            '<p><a href="/">Back</a></p>',
+        )
+
+    pending = _PENDING.pop(state, None)
+    if pending is None:
+        # Either the state was forged, or the flow was started before the
+        # instance restarted. Render's free tier spins down, which makes the
+        # second case ordinary rather than suspicious.
+        return page(
+            "Sign in failed",
+            '<h1 class="bad">Unknown state</h1>'
+            "<p>The sign in did not start on this instance, or it expired. "
+            'Free instances spin down when idle.</p><p><a href="/login">'
+            "Try again</a></p>",
+        )
+
+    try:
+        response = requests.post(
+            TOKEN_URL,
+            auth=(CLIENT_ID, CLIENT_SECRET),
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "code_verifier": pending["verifier"],
+            },
+            timeout=30,
+        )
+        body = response.json()
+    except Exception as exc:
+        return page(
+            "Sign in failed",
+            '<h1 class="bad">Could not reach the token endpoint</h1>'
+            f"<pre>{html.escape(str(exc)[:400])}</pre>",
+        )
+
+    if "access_token" not in body:
+        return page(
+            "Sign in failed",
+            '<h1 class="bad">Token exchange rejected</h1>'
+            f"<pre>{html.escape(json.dumps(body, indent=2)[:1200])}</pre>"
+            "<p>The redirect URI must match a registered one exactly, "
+            "including the scheme and any trailing slash.</p>",
+        )
+
+    claims = decode_claims(body["access_token"])
+    expires = claims.get("exp")
+    when = (
+        datetime.fromtimestamp(expires, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if expires
+        else "unknown"
+    )
+
+    rows = {
+        "Signed in as": claims.get("sub", "unknown"),
+        "Scopes granted": claims.get("scope") or "not stated",
+        "Issued by": claims.get("iss", "unknown"),
+        "Valid until": when,
+        "Refresh token": "yes" if body.get("refresh_token") else "no",
+    }
+    table = "".join(
+        f"<tr><td><strong>{html.escape(k)}</strong></td>"
+        f"<td><code>{html.escape(str(v))}</code></td></tr>"
+        for k, v in rows.items()
+    )
+
+    return page(
+        "Signed in",
+        '<h1 class="ok">Databricks sign in works</h1>'
+        f"<table>{table}</table>"
+        "<p>The access token is held in memory and is not shown here.</p>"
+        "<p>A token is not data access. Reaching Lakebase still needs the "
+        "endpoint details and a Postgres role with grants on the gold "
+        'tables.</p><p><a href="/">Back</a></p>',
+    )
