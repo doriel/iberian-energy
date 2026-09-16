@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # MIBEL market intelligence: medallion build
 # MAGIC
@@ -51,11 +55,16 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "", "Unity Catalog")
-dbutils.widgets.text("schema", "mibel", "Schema")
+# Widgets are recreated from scratch on every run. Without removeAll, a widget
+# that already exists keeps whatever value it had, so changing a default below
+# would silently have no effect.
+dbutils.widgets.removeAll()
+
+dbutils.widgets.text("catalog", "bootcamp_students", "Unity Catalog")
+dbutils.widgets.text("schema", "doriel", "Schema")
 dbutils.widgets.text("volume", "raw", "Volume for bronze")
 dbutils.widgets.text("start_day", "2026-09-01", "First market day (YYYY-MM-DD)")
-dbutils.widgets.text("days", "7", "Number of market days")
+dbutils.widgets.text("days", "1", "Number of market days")
 dbutils.widgets.text("secret_scope", "mibel", "Secret scope")
 dbutils.widgets.text("secret_key", "entsoe_token", "Secret key for the ENTSO-E token")
 
@@ -491,7 +500,7 @@ for row in spark.sql(f"SHOW TABLES IN {CATALOG}.{SCHEMA}").collect():
 # MAGIC   max_severity,
 # MAGIC   ROUND(share_saturated, 2) AS share_border_full,
 # MAGIC   ROUND(extra_cost_eur, 0)  AS extra_cost_eur
-# MAGIC FROM gold_split_episodes
+# MAGIC FROM bootcamp_students.doriel.gold_split_episodes
 # MAGIC ORDER BY duration_hours DESC, peak_premium_eur_mwh DESC
 
 # COMMAND ----------
