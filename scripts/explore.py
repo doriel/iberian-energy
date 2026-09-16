@@ -134,41 +134,71 @@ def cmd_day(root: Path, args) -> None:
 
 
 def cmd_weather(root: Path, args) -> None:
-    context = load(root, "gold", "gold_weather_context")
+    from iberian.analysis.weather import (
+        compare_locations,
+        weather_columns,
+        within_hour_correlation,
+    )
 
-    radiation = [c for c in context.columns if c.startswith("shortwave_radiation")]
+    context = load(root, "gold", "gold_weather_context")
+    radiation = weather_columns(context, "shortwave_radiation_wm2")
     if not radiation:
         print("No weather columns. Did build_medallion run with weather enabled?")
         return
 
     print("Does Spanish solar move the Spanish price?\n")
-    for column in radiation:
-        pair = context[[column, "price_es_eur_mwh"]].dropna()
-        if len(pair) < 10:
-            continue
-        correlation = pair[column].corr(pair["price_es_eur_mwh"])
-        location = column.split("__")[-1]
-        print(f"  {location:<16} correlation with ES price: {correlation:+.3f}")
+    print("  The naive column correlates radiation against price across every")
+    print("  interval. Both follow the solar clock, so it mostly measures the")
+    print("  time of day. The within hour column compares days against each")
+    print("  other at the same hour, which is the question actually worth")
+    print("  asking, and it is the only one of the two worth quoting.\n")
 
-    print("\n  A negative correlation is the expected sign: more sun, cheaper")
-    print("  Spanish power. This is the causal upstream that ENTSO-E alone")
-    print("  cannot give you, and it is why the second source earns its place.")
+    table = compare_locations(context, "shortwave_radiation_wm2")
 
-    sunny = context.copy()
-    for column in radiation[:1]:
-        sunny["band"] = pd.cut(
-            sunny[column], [-1, 1, 200, 500, 10000],
-            labels=["night", "low", "medium", "high"],
+    print(f"  {'location':<16} {'intervals':>10} {'hours':>6} "
+          f"{'naive':>8} {'within hour':>12}")
+    for _, row in table.iterrows():
+        naive = "n/a" if pd.isna(row["naive"]) else f"{row['naive']:+.3f}"
+        within = "n/a" if pd.isna(row["within_hour"]) else f"{row['within_hour']:+.3f}"
+        print(
+            f"  {row['location']:<16} {int(row['observations']):>10} "
+            f"{int(row['hours_used']):>6} {naive:>8} {within:>12}"
         )
-        summary = sunny.groupby("band", observed=True).agg(
-            intervals=("ts_utc", "count"),
-            mean_es_price=("price_es_eur_mwh", "mean"),
-            mean_pt_price=("price_pt_eur_mwh", "mean"),
-            split_rate=("is_decoupled", "mean"),
-        )
-        print(f"\n  Banded by {column.split('__')[-1]} radiation:")
-        print(summary.to_string())
 
+    portuguese = table[table["location"].str.startswith("PT")]
+    spanish = table[table["location"].str.startswith("ES")]
+    if not portuguese.empty and not spanish.empty:
+        pt_naive = portuguese["naive"].abs().max()
+        es_naive = spanish["naive"].abs().max()
+        if pd.notna(pt_naive) and pd.notna(es_naive) and abs(pt_naive - es_naive) < 0.15:
+            print("\n  Note the Portuguese rows. Portuguese cloud cover cannot move")
+            print("  the Spanish price, so a naive figure that is just as strong")
+            print("  there is the proof that the naive figure is about the clock.")
+
+    days = context["market_day"].nunique() if "market_day" in context.columns else 0
+    if days < 30:
+        print(f"\n  CAUTION: only {days} market day(s). The within hour estimate")
+        print("  compares days against each other, so it needs many of them.")
+
+    detail = spanish if not spanish.empty else table
+    column = f"shortwave_radiation_wm2__{detail.iloc[0]['location']}"
+    result = within_hour_correlation(context, column)
+    by_hour = result.by_hour
+    if not by_hour.empty:
+        print(f"\n  Hour by hour, {detail.iloc[0]['location']} (local time):\n")
+        print(f"  {'hour':>5} {'obs':>5} {'mean W/m2':>10} {'mean price':>11} "
+              f"{'corr':>8}")
+        for _, row in by_hour.iterrows():
+            correlation = (
+                "flat" if pd.isna(row["correlation"]) else f"{row['correlation']:+.3f}"
+            )
+            print(
+                f"  {int(row['local_hour']):>4}h {int(row['observations']):>5} "
+                f"{row['mean_weather']:>10.1f} {row['mean_price']:>11.2f} "
+                f"{correlation:>8}"
+            )
+        print("\n  'flat' means the radiation did not vary within that hour,")
+        print("  which at night is every reading being zero.")
 
 def cmd_compare(root: Path, args) -> None:
     """ENTSO-E against OMIE, from the stored silver tables."""
