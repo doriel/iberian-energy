@@ -1,6 +1,6 @@
 """Gold tables, one per persona.
 
-Every gold table must serve a named user. These tests check
+The proposal says every gold table must serve a named user. These tests check
 the numbers those users would act on, especially the cost figure, which is the
 easiest thing in the whole project to overstate by an order of magnitude.
 """
@@ -116,6 +116,37 @@ def test_episode_marks_whether_saturation_explains_it():
     loose = gold_split_episodes(flagged, build_border(8, flow=500.0, capacity=2000.0))
     assert loose.iloc[0]["share_saturated"] == 0.0
     assert bool(loose.iloc[0]["explained_by_saturation"]) is False
+
+
+def test_episodes_carry_a_market_day_so_writes_stay_incremental():
+    """Without this column the Delta writer falls back to a full overwrite.
+
+    Every other gold table uses replaceWhere on market_day, so re-running one
+    day replaces only that day. This table used to have no market_day, which
+    meant a scheduled daily run would quietly delete every earlier episode.
+    """
+    pt = [50.0] * 8
+    es = [50.0] * 8
+    pt[2] = 70.0
+
+    episodes = gold_split_episodes(build_flagged(pt, es), build_border(8))
+
+    assert "market_day" in episodes.columns
+    # START is 22:00Z on 2 September, which is the market day of the 3rd.
+    assert episodes["market_day"].iloc[0].isoformat() == "2026-09-03"
+
+
+def test_empty_episodes_still_declare_the_market_day_column():
+    """A quiet day returns no rows, but the shape has to stay the same.
+
+    A table whose columns depend on whether anything happened is a table that
+    breaks a downstream query on the first calm week.
+    """
+    flagged = build_flagged([50.0] * 8, [50.0] * 8)
+    episodes = gold_split_episodes(flagged, build_border(8))
+
+    assert episodes.empty
+    assert "market_day" in episodes.columns
 
 
 def test_reverse_flow_does_not_create_negative_cost():
