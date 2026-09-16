@@ -12,6 +12,35 @@ Two companion documents go deeper than this one:
 - [ROADMAP.md](ROADMAP.md) shows what is built, what is in progress, and what
   comes next.
 
+## Validation
+
+The cost figure this project reports is checked against the system operator's
+own published number.
+
+`gold_split_episodes.extra_cost_eur` is the premium Portugal paid multiplied by
+the energy actually imported while the zones priced apart, computed from
+ENTSO-E prices and schedules. REE publishes the day-ahead congestion rent on
+the same border. Across 60 market days:
+
+| | |
+|---|---|
+| This project | 11,302,847 EUR |
+| REE congestion rent | 11,303,022 EUR |
+| Difference | 0.0015% |
+
+Both series descend from the same market clearing, so this is a check on the
+implementation rather than an independent measurement. It is a demanding one:
+the Iberian market day runs from local midnight in CET rather than UTC, prices
+are quarter hourly, ENTSO-E omits repeated values from its series, and the
+spread has a direction. Any of those handled wrongly and the figures do not
+agree.
+
+The residual 0.0015% is accounted for rather than waved away. See
+[ROADMAP.md](ROADMAP.md#validated-results).
+
+Day-ahead prices are separately checked against OMIE, an independent publisher
+of the same settled figures, and agree exactly across all intervals.
+
 ## Why the code is shaped this way
 
 The ingestion, parsing, analysis and gold modules are plain Python and pandas
@@ -40,6 +69,10 @@ landed rather than re-hitting a rate limited API.
    a finding.
 5. **Adds the upstream driver.** Open-Meteo solar, wind and temperature explain
    why Spanish power was cheap enough to import in the first place.
+6. **Validates the cost figure.** REE publishes the congestion rent on the same
+   border, which is the same economic quantity computed by the operator of the
+   interconnector. Agreement is 0.0015% across 60 market days, and the residual
+   is accounted for rather than waved away.
 
 ## Data sources
 
@@ -48,8 +81,9 @@ landed rather than re-hitting a rate limited API.
 | ENTSO-E Transparency | XML API (sometimes ZIP) | A44 prices, A09 scheduled exchanges, A61 day-ahead capacity, A78 transmission outages, A80 generation outages |
 | OMIE | Delimited files | `marginalpdbc` day-ahead marginal prices for both zones |
 | Open-Meteo | JSON API | Hourly solar radiation, wind and temperature at price relevant locations |
+| REE / ESIOS | JSON API | Day-ahead congestion rent on the PT/ES border, demand forecast and actual demand |
 
-Only ENTSO-E needs a credential.
+ENTSO-E and ESIOS need a credential. OMIE and Open-Meteo are open.
 
 ## Layout
 
@@ -62,29 +96,35 @@ src/iberian/
     border.py                   fetch and land PT/ES cross-border series
     omie.py                     OMIE file client and marginalpdbc parser
     open_meteo.py               weather client, locations and hourly parser
+    esios.py                    REE indicators: congestion rent, demand forecast
   parsing/
     entsoe_prices.py            A44 prices and quantity series -> tidy rows
     entsoe_outages.py           A78 notices -> capacity curves, point in time filter
   analysis/
     market_splitting.py         decoupling detection + episode grouping
     interconnection.py          capacity/schedule alignment, saturation evidence
+    weather.py                  weather against price, controlled for hour of day
   pipeline/
     gold.py                     one gold table per persona
+app/                            web service, Databricks sign in
 scripts/                        see "Scripts" below
 tests/                          synthetic data, no network, no credentials
-pipelines/                      reserved for Lakeflow definitions (empty)
-data/raw/                       bronze: local stand in for the S3 landing zone
+pipelines/                      Databricks notebook, imported as a Git folder
+evaluation/                     hand labelled ground truth for cause attribution
+data/raw/                       bronze: raw payloads, mirrors the Unity Catalog Volume
 data/lakehouse/silver/          silver: parsed parquet, one table per source
 data/lakehouse/gold/            gold: persona tables, what an app or agent reads
 ```
 
 `data/` is gitignored. A clean checkout rebuilds it with `build_medallion.py`.
+`evaluation/` is not: those labels are human judgement and cannot be
+regenerated.
 
 ## Run it now, without credentials
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -q                        # 74 tests, about a second
+python -m pytest tests/ -q                        # 99 tests, about a second
 python scripts/run_market_splitting.py --demo
 ```
 
@@ -111,6 +151,11 @@ silver and writes the gold tables. `--skip-weather` and `--skip-omie` leave a
 source out. Seven days proves the pipeline; thirty or more is needed before the
 daily profile means anything.
 
+`--from-silver` recomputes only the gold tables from what is already on disk,
+without calling any API. That is the operation to run after changing analysis
+logic: gold is a pure function of silver, so reprocessing sixty days takes
+seconds where re-ingesting them takes an hour.
+
 ### ENTSO-E token
 
 1. Register at https://transparency.entsoe.eu and verify the email.
@@ -118,6 +163,13 @@ daily profile means anything.
    registered email address in the body. Access is granted within three
    working days.
 3. Once granted, log in, go to **My Account**, and generate a token.
+
+### ESIOS token
+
+Email `consultasios@ree.es` with subject `Personal token request`, stating who
+you are and what you intend to query. The token is personal, and REE's terms
+require that anything published reads from your own server rather than theirs,
+which is what the lakehouse here is for.
 
 ## Gold tables
 
@@ -139,17 +191,21 @@ episode, not to Portuguese demand, which would overstate it wildly.
 |---|---|
 | `check_token.py` | One small request to confirm the token and EIC codes |
 | `run_market_splitting.py` | Detection only, `--demo` or `--start/--days` |
-| `build_medallion.py` | Bronze, silver and gold end to end over a date range |
+| `build_medallion.py` | Bronze, silver and gold end to end, or `--from-silver` for gold alone |
 | `explore.py` | Read the lakehouse back: `tables`, `profile`, `episodes`, `day`, `weather`, `compare` |
 | `explain_interval.py` | The grounded, fully sourced explanation for one instant (`--at`, `--no-point-in-time`) |
+| `build_evaluation_set.py` | Assemble the labelling sheet for cause attribution, point in time filtered |
+| `check_congestion_rent.py` | The cost figure against REE's published congestion rent |
 | `analyse_saturation.py` | Does a full border explain the splits across a range? |
 | `show_capacity.py` | Capacity curve hour by hour with splits marked |
 | `show_window.py` | PT and ES prices side by side from landed XML, no API call |
 | `cross_check_prices.py` | ENTSO-E against OMIE, and which OMIE column is Portugal |
+| `check_databricks_auth.py` | Whether a Databricks OAuth credential can get a token, and for which scopes |
 | `probe_crossborder.py` | Which cross-border document types return data |
 | `probe_transmission.py` | A78 notices on the border and the publication time filter |
 | `probe_outages.py` | Structure of an A80 generation outage document |
 | `probe_sources.py` | Raw OMIE and Open-Meteo payloads |
+| `probe_esios.py` | Search the ESIOS indicator catalogue by name before using an id |
 | `inspect_document.py` | Structure of one A44 document |
 
 The `probe_` and `inspect_` scripts exist to look at a real payload before
@@ -160,13 +216,13 @@ writing a parser against a guess. Example invocations for all of them are in
 
 See [ROADMAP.md](ROADMAP.md) for full status. In short:
 
-- REE/ESIOS and REN Datahub clients, and REN/ERSE published announcements
-- Delta tables, Unity Catalog, S3 landing zone, and the Lakeflow pipeline
-  definitions in `pipelines/`
-- Lakebase sync, Vector Search over outage notices, MLflow, Asset Bundles
+- REN Datahub, and REN/ERSE published announcements
+- Lakeflow pipeline definitions, Lakebase sync, Vector Search over outage
+  notices, MLflow, Asset Bundles
 - The agent, which will phrase what `explain_interval.py` already assembles
 - The labelled evaluation set and programmatic numeric hallucination checks
-- The Render app that serves it
+- The Render app serving the gold tables, currently deployed with Databricks
+  sign in working but no data behind it
 
 ## Known gotchas already handled
 
@@ -213,3 +269,20 @@ with a binary search.
 excluded, server side via `periodStartUpdate` and client side in
 `binding_assets`. Constraints are also kept per direction, so a PT to ES limit
 is never cited as the reason power could not flow ES to PT.
+
+**A one cent spread is not an event.** Intervals where PT and ES differ by the
+0.01 EUR/MWh rounding epsilon are treated as coupled. REE's congestion rent
+accounting has no such floor, which is the entire residual between the two cost
+figures: 175 EUR out of 11.3 million. The threshold is kept, because counting
+market rounding as a split would fill the episode table with non events. It is
+also why saturation is detected from utilisation rather than from the spread:
+on 22 August the border carried 5,400 MW while prices separated by one cent, a
+real constraint with no economic consequence.
+
+**Weather correlates with the clock.** Solar radiation and price both follow
+the solar cycle, so a raw correlation between them mostly measures the time of
+day. The first version of this analysis reported around -0.75 and reported
+nearly the same figure for Lisbon as for Andalusia, where the mechanism cannot
+apply. `analysis/weather.py` estimates within hour of day instead, in local
+time, and reports the naive figure alongside so the size of the confound stays
+visible.
