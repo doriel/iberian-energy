@@ -6,10 +6,16 @@ which Databricks reads directly and converts to Delta with one statement, so
 the port is mechanical rather than a rewrite.
 
     python scripts/build_medallion.py --start 2026-09-01 --days 7
+    python scripts/build_medallion.py --from-silver
 
-Everything the pipeline needs is already in the raw landing zone if you have
-run the other scripts, but this fetches what is missing so a clean checkout
-produces the same tables.
+Gold is a pure function of silver, so `--from-silver` recomputes the gold
+tables from what is already on disk without calling any API. That is the
+operation to run after changing analysis logic: reprocessing sixty days of
+stored rows takes seconds, while re-ingesting them takes an hour and asks four
+providers for data they already sent.
+
+It is a mode of this script rather than a separate one on purpose. Two entry
+points that both build gold are two code paths that drift apart.
 """
 
 from __future__ import annotations
@@ -54,15 +60,93 @@ def write_table(frame: pd.DataFrame, root: Path, name: str, layer: str) -> None:
     print(f"  {layer}/{name}: {len(frame):>6} rows -> {path}")
 
 
+def read_table(root: Path, layer: str, name: str, required: bool = True) -> pd.DataFrame:
+    path = root / layer / f"{name}.parquet"
+    if not path.exists():
+        if required:
+            raise SystemExit(f"{path} not found. Run an ingesting build first.")
+        print(f"  {layer}/{name}: missing, continuing without it")
+        return pd.DataFrame()
+    frame = pd.read_parquet(path)
+    print(f"  {layer}/{name}: {len(frame):>6} rows")
+    return frame
+
+
+def build_gold(
+    prices: pd.DataFrame,
+    schedules: pd.DataFrame,
+    capacity: pd.DataFrame,
+    weather: pd.DataFrame,
+    out_dir: Path,
+) -> tuple[dict, pd.Timedelta]:
+    """The one place gold is built, whichever mode got us here."""
+    flagged = flag_decoupling(build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN))
+    step = infer_step(flagged)
+    border = build_border_series(schedules, capacity, (EIC_SPAIN, EIC_PORTUGAL))
+
+    tables = gold_tables(flagged, border, weather)
+
+    print("\nGOLD")
+    for name, frame in tables.items():
+        write_table(frame, out_dir, name, "gold")
+
+    return tables, step
+
+
+def report(tables: dict, step: pd.Timedelta, out_dir: Path) -> None:
+    profile = tables.get("gold_daily_profile")
+    if profile is not None and not profile.empty:
+        worst = profile.loc[profile["split_probability"].idxmax()]
+        print(
+            f"\n  Worst hour for Portugal: {int(worst['hour_of_day_utc']):02d}:00 UTC, "
+            f"split in {worst['split_probability']:.0%} of intervals, "
+            f"mean premium {worst['mean_premium_eur_mwh']:+.2f} EUR/MWh"
+        )
+
+    episodes = tables.get("gold_split_episodes")
+    if episodes is not None and not episodes.empty:
+        total = episodes["extra_cost_eur"].dropna().sum()
+        days = episodes["market_day"].nunique()
+        print(
+            f"  Episodes: {len(episodes)} across {days} market day(s), "
+            f"extra import cost {total:,.0f} EUR"
+        )
+
+    print(f"\nSettlement interval {int((step / pd.Timedelta(hours=1)) * 60)} minutes")
+    print(f"Lakehouse written under {out_dir}/")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--start", required=True, help="first market day, YYYY-MM-DD")
+    parser.add_argument("--start", help="first market day, YYYY-MM-DD")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--raw-dir", default="data/raw")
     parser.add_argument("--out-dir", default="data/lakehouse")
     parser.add_argument("--skip-weather", action="store_true")
     parser.add_argument("--skip-omie", action="store_true")
+    parser.add_argument(
+        "--from-silver",
+        action="store_true",
+        help="recompute gold from the silver tables on disk, without ingesting",
+    )
     args = parser.parse_args()
+
+    if not args.from_silver and not args.start:
+        parser.error("--start is required unless --from-silver is given")
+
+    out_dir = Path(args.out_dir)
+
+    if args.from_silver:
+        print("SILVER, from disk")
+        tables, step = build_gold(
+            read_table(out_dir, "silver", "silver_entsoe_prices"),
+            read_table(out_dir, "silver", "silver_entsoe_schedules"),
+            read_table(out_dir, "silver", "silver_entsoe_capacity"),
+            read_table(out_dir, "silver", "silver_weather", required=False),
+            out_dir,
+        )
+        report(tables, step, out_dir)
+        return 0
 
     start_day = date.fromisoformat(args.start)
     days = [start_day + timedelta(days=offset) for offset in range(args.days)]
@@ -70,7 +154,6 @@ def main() -> int:
     start_utc, end_utc = market_day_range(start_day, args.days)
 
     raw_dir = Path(args.raw_dir)
-    out_dir = Path(args.out_dir)
 
     settings = Settings.from_env()
     client = EntsoeClient(settings.require_entsoe_token())
@@ -153,32 +236,10 @@ def main() -> int:
         write_table(frame, out_dir, name, "silver")
 
     # --- gold ---
-    flagged = flag_decoupling(build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN))
-    step = infer_step(flagged)
-    border = build_border_series(schedules, capacity, (EIC_SPAIN, EIC_PORTUGAL))
-
-    tables = gold_tables(flagged, border, pd.DataFrame(weather_rows))
-
-    print("\nGOLD")
-    for name, frame in tables.items():
-        write_table(frame, out_dir, name, "gold")
-
-    profile = tables.get("gold_daily_profile")
-    if profile is not None and not profile.empty:
-        worst = profile.loc[profile["split_probability"].idxmax()]
-        print(
-            f"\n  Worst hour for Portugal: {int(worst['hour_of_day_utc']):02d}:00 UTC, "
-            f"split in {worst['split_probability']:.0%} of intervals, "
-            f"mean premium {worst['mean_premium_eur_mwh']:+.2f} EUR/MWh"
-        )
-
-    episodes = tables.get("gold_split_episodes")
-    if episodes is not None and not episodes.empty:
-        total = episodes["extra_cost_eur"].dropna().sum()
-        print(f"  Episodes: {len(episodes)}, extra import cost {total:,.0f} EUR")
-
-    print(f"\nSettlement interval {int((step / pd.Timedelta(hours=1)) * 60)} minutes")
-    print(f"Lakehouse written under {out_dir}/")
+    tables, step = build_gold(
+        prices, schedules, capacity, pd.DataFrame(weather_rows), out_dir
+    )
+    report(tables, step, out_dir)
     return 0
 
 
