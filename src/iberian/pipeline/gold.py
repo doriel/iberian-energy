@@ -1,8 +1,8 @@
 """Gold tables, one per persona.
 
-The platform is designed around three users, and every gold table must serve
-one of them. That constraint is worth taking literally: a table nobody named
-can be cut, and a persona with no table is a gap in the product.
+The proposal commits to three users and states that every gold table must
+serve one of them. That constraint is worth taking literally: a table nobody
+named can be cut, and a persona with no table is a promise not kept.
 
 1. A manufacturer deciding when to run energy intensive equipment.
 2. A journalist or regulator watcher needing a defensible number with a cause.
@@ -23,6 +23,7 @@ from iberian.analysis.market_splitting import (
     flag_decoupling,
     infer_step,
 )
+from iberian.market_time import to_market_day
 
 
 def gold_interval_premium(joined: pd.DataFrame) -> pd.DataFrame:
@@ -110,8 +111,17 @@ def gold_split_episodes(
 
     step = step or infer_step(flagged)
     episodes = detect_episodes(flagged, step=step)
+
+    # Every other gold table carries market_day, and the Delta writer uses it
+    # for replaceWhere so that re-running one day replaces only that day. This
+    # table had no such column, which silently dropped it to a full overwrite:
+    # a scheduled daily run would have deleted every earlier episode. An
+    # episode that crosses midnight is attributed to the day it started in,
+    # which is also how anyone reading the table would describe it.
     if episodes.empty:
+        episodes["market_day"] = pd.Series(dtype="object")
         return episodes
+    episodes["market_day"] = episodes["start_utc"].apply(to_market_day)
 
     step_hours = step / pd.Timedelta(hours=1)
 
