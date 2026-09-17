@@ -1,0 +1,248 @@
+"""The guarantee that the explanation layer rests on.
+
+The design says the model phrases retrieved facts and never produces a figure
+of its own. A prompt cannot guarantee that, so it is enforced after generation.
+These tests pin down both failure directions: an invented number must fail, and
+a faithful rendering of a real number must not.
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from iberian.agent.facts import Fact, FactSheet, episode_facts  # noqa: E402
+from iberian.agent.verify import extract_claims, verify  # noqa: E402
+
+START = datetime(2026, 8, 18, 7, 45, tzinfo=timezone.utc)
+END = datetime(2026, 8, 18, 15, 15, tzinfo=timezone.utc)
+
+
+def sheet(*facts: Fact, caveats: list[str] | None = None) -> FactSheet:
+    return FactSheet(
+        subject="test episode",
+        start_utc=START,
+        end_utc=END,
+        market_day=date(2026, 8, 18),
+        facts=list(facts),
+        caveats=caveats or [],
+    )
+
+
+def standard() -> FactSheet:
+    return sheet(
+        Fact("peak_premium", 109.84, "EUR/MWh", "ENTSO-E A44 day-ahead"),
+        Fact("min_border_capacity", 3195.0, "MW", "ENTSO-E A61 day-ahead capacity"),
+        Fact("share_of_intervals_saturated", 1.0, "", "A09 flow against A61 capacity"),
+        Fact("constrained_asset", "Alcochete-Palmela", "", "ENTSO-E A78"),
+    )
+
+
+def test_an_invented_number_fails():
+    """The whole point. 4200 MW was never retrieved."""
+    text = (
+        "Portugal paid 109.84 EUR/MWh more [ENTSO-E A44] while the border was "
+        "limited to 4200 MW."
+    )
+    verdict = verify(text, standard())
+
+    assert not verdict.ok
+    assert [claim.value for claim in verdict.unsupported] == [4200.0]
+
+
+def test_the_retrieved_numbers_pass():
+    text = (
+        "Portugal paid up to 109.84 EUR/MWh more than Spain [ENTSO-E A44 "
+        "day-ahead] while day-ahead capacity fell to 3,195 MW."
+    )
+    assert verify(text, standard()).ok
+
+
+def test_thousands_separators_are_the_same_number():
+    text = "Capacity was 3,195 MW [ENTSO-E A61]."
+    assert verify(text, standard()).ok
+
+
+def test_a_share_written_as_a_percentage_passes():
+    """1.0 rendered as 100% is not an invention."""
+    text = "The border was full in 100% of intervals [A09 flow against A61 capacity]."
+    assert verify(text, standard()).ok
+
+
+def test_a_partial_share_written_as_a_percentage_passes():
+    facts = sheet(
+        Fact("share_of_intervals_saturated", 0.37, "", "A09 against A61"),
+        Fact("peak_premium", 12.93, "EUR/MWh", "ENTSO-E A44"),
+    )
+    assert verify("Split in 37% of intervals [A09 against A61].", facts).ok
+
+
+def test_rounding_to_the_precision_written_is_faithful():
+    """"roughly 3,200 MW" is a fair reading of 3195."""
+    text = "Capacity fell to roughly 3,200 MW [ENTSO-E A61]."
+    assert verify(text, standard()).ok
+
+
+def test_a_different_number_is_not_rounding():
+    """3,500 is not 3,195, and accepting it would make the check theatre."""
+    text = "Capacity fell to 3,500 MW [ENTSO-E A61]."
+    verdict = verify(text, standard())
+    assert not verdict.ok
+    assert verdict.unsupported[0].value == 3500.0
+
+
+def test_dates_and_times_are_not_treated_as_measurements():
+    text = (
+        "Between 2026-08-18 07:45Z and 15:15Z the premium reached 109.84 EUR/MWh "
+        "[ENTSO-E A44]."
+    )
+    assert verify(text, standard()).ok
+
+
+def test_small_counting_numbers_do_not_fail_the_check():
+    text = "The first of 2 constrained assets was named [ENTSO-E A78]."
+    assert verify(text, standard()).ok
+
+
+def test_an_explanation_with_no_source_is_not_grounded():
+    """Every figure right and nothing traceable is still not evidence."""
+    text = "Portugal paid 109.84 EUR/MWh more while capacity fell to 3195 MW."
+    verdict = verify(text, standard())
+
+    assert not verdict.ok
+    assert verdict.missing_sources
+    assert not verdict.unsupported
+
+
+def test_source_matching_is_loose_enough_to_be_usable():
+    """Citing A44 counts for "ENTSO-E A44 day-ahead"."""
+    text = "The premium was 109.84 EUR/MWh, from A44."
+    assert verify(text, standard()).ok
+
+
+def test_prose_with_no_numbers_at_all_passes():
+    assert verify("The zones priced apart for several hours.", standard()).ok
+
+
+def test_extraction_reads_how_the_number_was_written():
+    claims = extract_claims("109.84 EUR/MWh, 3,195 MW, and 37%")
+    assert [claim.value for claim in claims] == [109.84, 3195.0, 37.0]
+    assert [claim.decimals for claim in claims] == [2, 0, 0]
+    assert [claim.is_percent for claim in claims] == [False, False, True]
+
+
+def test_negative_numbers_are_checked_too():
+    facts = sheet(Fact("premium", -28.22, "EUR/MWh", "ENTSO-E A44"))
+    assert verify("The spread was -28.22 EUR/MWh [A44].", facts).ok
+    assert not verify("The spread was -31.5 EUR/MWh [A44].", facts).ok
+
+
+def test_verdict_names_what_failed():
+    text = "Capacity was 4200 MW and the premium 109.84 EUR/MWh [A44]."
+    assert "4200" in verify(text, standard()).describe()
+
+
+# --- the sheet itself -------------------------------------------------------
+
+
+def build_episode(**overrides) -> pd.Series:
+    row = {
+        "start_utc": pd.Timestamp(START),
+        "end_utc": pd.Timestamp(END),
+        "market_day": date(2026, 8, 18),
+        "duration_hours": 7.5,
+        "intervals": 30,
+        "peak_spread": 109.84,
+        "premium_side": "PT",
+        "max_severity": "severe",
+        "extra_cost_eur": 1853272.0,
+        "share_saturated": 1.0,
+    }
+    row.update(overrides)
+    return pd.Series(row)
+
+
+def build_intervals() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts_utc": [pd.Timestamp(START)],
+            "price_pt_eur_mwh": [163.0],
+            "price_es_eur_mwh": [53.16],
+            "capacity_mw": [3195.0],
+            "net_flow_mw": [3195.0],
+        }
+    )
+
+
+def test_the_sheet_only_allows_numbers_that_were_retrieved():
+    facts = episode_facts(build_episode(), build_intervals())
+    allowed = facts.numbers()
+
+    assert 109.84 in allowed
+    assert 3195.0 in allowed
+    assert 1853272.0 in allowed
+    # Never retrieved, and not derivable by the model either.
+    assert 4200.0 not in allowed
+
+
+def test_a_missing_notice_becomes_a_caveat_rather_than_silence():
+    facts = episode_facts(build_episode(), build_intervals(), assets=None)
+
+    assert facts.get("notices_in_force").value == 0
+    assert any("unexplained" in caveat.lower() for caveat in facts.caveats)
+
+
+def test_a_notice_that_does_not_account_for_the_drop_is_flagged():
+    """The notice permits 4700 MW while the border had 3195."""
+    assets = [
+        {
+            "asset": "Pereiros-Rio Maior 1",
+            "available_mw": 4700.0,
+            "status": "unplanned",
+            "published_at": datetime(2026, 6, 25, tzinfo=timezone.utc),
+        }
+    ]
+    facts = episode_facts(build_episode(), build_intervals(), assets=assets)
+
+    assert any("does not account" in caveat for caveat in facts.caveats)
+
+
+def test_saturation_carries_a_caveat_against_claiming_causation():
+    facts = episode_facts(build_episode(), build_intervals())
+    assert any("causation" in caveat for caveat in facts.caveats)
+
+
+def test_the_rendered_sheet_carries_sources_for_the_model_to_cite():
+    rendered = episode_facts(build_episode(), build_intervals()).render()
+
+    assert "ENTSO-E A44 day-ahead" in rendered
+    assert "ENTSO-E A61 day-ahead capacity" in rendered
+    assert "Caveats" in rendered
+
+
+def test_the_cost_fact_carries_the_note_that_stops_it_being_overstated():
+    facts = episode_facts(build_episode(), build_intervals())
+    cost = facts.get("extra_import_cost")
+
+    assert cost is not None
+    assert "not to national demand" in cost.note
+
+
+def test_generated_text_is_checked_against_a_real_assembled_sheet():
+    facts = episode_facts(build_episode(), build_intervals())
+
+    honest = (
+        "Portugal paid up to 109.84 EUR/MWh more than Spain [ENTSO-E A44 "
+        "day-ahead] over 7.5 hours, while day-ahead capacity fell to 3,195 MW "
+        "[ENTSO-E A61 day-ahead capacity]."
+    )
+    assert verify(honest, facts).ok
+
+    invented = honest.replace("3,195 MW", "2,400 MW")
+    assert not verify(invented, facts).ok
