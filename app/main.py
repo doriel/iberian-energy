@@ -43,8 +43,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 app = FastAPI(title="MIBEL Market Intelligence")
 
 HOST = (os.environ.get("DATABRICKS_HOST") or "").rstrip("/")
-CLIENT_ID = os.environ.get("DATABRICKS_CLIENT_ID", "")
-CLIENT_SECRET = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
+CLIENT_ID = os.environ.get("APP_OAUTH_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("APP_OAUTH_CLIENT_SECRET", "")
 REDIRECT_URI = os.environ.get("DATABRICKS_REDIRECT_URI", "")
 SCOPES = os.environ.get("DATABRICKS_SCOPES", "postgres")
 
@@ -65,8 +65,8 @@ def configured() -> list[str]:
         name
         for name, value in (
             ("DATABRICKS_HOST", HOST),
-            ("DATABRICKS_CLIENT_ID", CLIENT_ID),
-            ("DATABRICKS_CLIENT_SECRET", CLIENT_SECRET),
+            ("APP_OAUTH_CLIENT_ID", CLIENT_ID),
+            ("APP_OAUTH_CLIENT_SECRET", CLIENT_SECRET),
             ("DATABRICKS_REDIRECT_URI", REDIRECT_URI),
         )
         if not value
