@@ -146,23 +146,34 @@ def episode_facts(
             "premium applied to energy actually imported, not to national demand",
         )
 
-    if not intervals.empty:
-        if "price_pt_eur_mwh" in intervals:
-            add("worst_price_pt", intervals["price_pt_eur_mwh"].max(), "EUR/MWh",
-                "ENTSO-E A44 day-ahead")
-        if "price_es_eur_mwh" in intervals:
-            add("lowest_price_es", intervals["price_es_eur_mwh"].min(), "EUR/MWh",
-                "ENTSO-E A44 day-ahead")
-        if "capacity_mw" in intervals:
-            capacity = intervals["capacity_mw"].dropna()
-            if not capacity.empty:
-                add("min_border_capacity", capacity.min(), "MW",
-                    "ENTSO-E A61 day-ahead capacity")
-        if "net_flow_mw" in intervals:
-            flow = intervals["net_flow_mw"].dropna()
-            if not flow.empty:
-                add("max_net_flow_es_to_pt", flow.max(), "MW",
-                    "ENTSO-E A09 scheduled exchanges")
+    # Everything below comes from one interval, the worst one, rather than
+    # taking a maximum here and a minimum there. Mixing intervals produces
+    # figures that cannot be reconciled: the highest Portuguese price minus the
+    # lowest Spanish price is not the peak spread, and the largest flow can
+    # exceed the smallest capacity, which reads as impossible. A model handed
+    # that would write something false, and the fault would be in the evidence
+    # rather than in the model.
+    if not intervals.empty and "abs_premium_eur_mwh" in intervals:
+        worst = intervals.loc[intervals["abs_premium_eur_mwh"].idxmax()]
+        moment = f"at {pd.Timestamp(worst['ts_utc']):%H:%M}Z, the worst interval"
+
+        if "price_pt_eur_mwh" in worst:
+            add("price_pt_at_peak", worst["price_pt_eur_mwh"], "EUR/MWh",
+                "ENTSO-E A44 day-ahead", moment)
+        if "price_es_eur_mwh" in worst:
+            add("price_es_at_peak", worst["price_es_eur_mwh"], "EUR/MWh",
+                "ENTSO-E A44 day-ahead", moment)
+        if pd.notna(worst.get("capacity_mw")):
+            add("border_capacity_at_peak", worst["capacity_mw"], "MW",
+                "ENTSO-E A61 day-ahead capacity", moment)
+        if pd.notna(worst.get("net_flow_mw")):
+            add("net_flow_es_to_pt_at_peak", worst["net_flow_mw"], "MW",
+                "ENTSO-E A09 scheduled exchanges", moment)
+
+        capacity = intervals["capacity_mw"].dropna() if "capacity_mw" in intervals else None
+        if capacity is not None and not capacity.empty:
+            add("lowest_border_capacity", capacity.min(), "MW",
+                "ENTSO-E A61 day-ahead capacity", "lowest across the episode")
 
     if pd.notna(episode.get("share_saturated")):
         share = float(episode["share_saturated"])
@@ -191,7 +202,7 @@ def episode_facts(
                 source="ENTSO-E A78 publication timestamp")
 
         capacity_fact = next(
-            (f for f in facts if f.key == "min_border_capacity"), None
+            (f for f in facts if f.key == "lowest_border_capacity"), None
         )
         available = _number(tightest.get("available_mw"))
         if capacity_fact and available is not None and capacity_fact.is_numeric:

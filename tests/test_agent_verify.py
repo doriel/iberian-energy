@@ -169,15 +169,45 @@ def build_episode(**overrides) -> pd.Series:
 
 
 def build_intervals() -> pd.DataFrame:
+    """Two intervals, deliberately unequal, so mixing them would be visible.
+
+    The worst interval is the second: a 109.84 premium against the first's
+    20.00. Facts drawn from a single interval must come from that one.
+    """
     return pd.DataFrame(
         {
-            "ts_utc": [pd.Timestamp(START)],
-            "price_pt_eur_mwh": [163.0],
-            "price_es_eur_mwh": [53.16],
-            "capacity_mw": [3195.0],
-            "net_flow_mw": [3195.0],
+            "ts_utc": [pd.Timestamp(START), pd.Timestamp(START) + pd.Timedelta(minutes=15)],
+            "price_pt_eur_mwh": [121.51, 163.00],
+            "price_es_eur_mwh": [101.51, 53.16],
+            "abs_premium_eur_mwh": [20.00, 109.84],
+            "capacity_mw": [4000.0, 3195.0],
+            "net_flow_mw": [3571.0, 3195.0],
         }
     )
+
+
+def test_facts_from_one_interval_come_from_the_same_interval():
+    """Mixing a maximum here with a minimum there produces impossible evidence.
+
+    Taking the highest Portuguese price and the lowest Spanish price across the
+    episode gives a difference that is not the spread, and the largest flow can
+    exceed the smallest capacity, which reads as physically impossible. A model
+    handed that would write something false, and the fault would be in the
+    evidence rather than the model.
+    """
+    facts = episode_facts(build_episode(), build_intervals())
+
+    price_pt = facts.get("price_pt_at_peak").value
+    price_es = facts.get("price_es_at_peak").value
+    capacity = facts.get("border_capacity_at_peak").value
+    flow = facts.get("net_flow_es_to_pt_at_peak").value
+
+    # All four come from the second interval, the worst one.
+    assert (price_pt, price_es, capacity, flow) == (163.0, 53.16, 3195.0, 3195.0)
+    # And they reconcile: the two prices differ by the peak premium.
+    assert round(price_pt - price_es, 2) == facts.get("peak_premium").value
+    # Flow cannot exceed capacity at the same moment.
+    assert flow <= capacity
 
 
 def test_the_sheet_only_allows_numbers_that_were_retrieved():
@@ -187,6 +217,9 @@ def test_the_sheet_only_allows_numbers_that_were_retrieved():
     assert 109.84 in allowed
     assert 3195.0 in allowed
     assert 1853272.0 in allowed
+    # The lowest capacity across the episode is also retrieved, and labelled
+    # as such rather than quietly mixed with the peak interval figures.
+    assert facts.get("lowest_border_capacity").value == 3195.0
     # Never retrieved, and not derivable by the model either.
     assert 4200.0 not in allowed
 
