@@ -105,6 +105,58 @@ def test_dates_and_times_are_not_treated_as_measurements():
     assert verify(text, standard()).ok
 
 
+def test_a_date_written_out_in_prose_is_not_a_measurement():
+    """"published on 25 June 2026" cost us 19 rejections of faithful text."""
+    text = (
+        "The notice was published on 25 June 2026 and the premium reached "
+        "109.84 EUR/MWh [ENTSO-E A44]."
+    )
+    assert verify(text, standard()).ok
+
+
+def test_every_prose_date_shape_the_models_actually_wrote():
+    for written in (
+        "on 2 September 2026",
+        "on 28 August",
+        "published June 25, 2026",
+        "during August 2026",
+        "from 09:30Z to 09:45Z on 18 July 2026",
+    ):
+        text = f"The premium was 109.84 EUR/MWh [ENTSO-E A44], {written}."
+        assert verify(text, standard()).ok, written
+
+
+def test_digits_inside_a_retrieved_asset_name_are_not_claims():
+    """`AT 2 400/220 SRM` is a transformer, not two measurements.
+
+    The name came from the A78 notice and the agent was asked to quote it.
+    Reading 400 and 220 as invented figures rejected an explanation that had
+    done exactly the right thing.
+    """
+    facts = sheet(
+        Fact("peak_premium", 16.25, "EUR/MWh", "ENTSO-E A44"),
+        Fact("constrained_asset", "AT 2 400/220 SRM", "", "ENTSO-E A78"),
+    )
+    text = (
+        "A planned outage on the AT 2 400/220 SRM asset was in force "
+        "[ENTSO-E A78] while the premium reached 16.25 EUR/MWh [ENTSO-E A44]."
+    )
+    assert verify(text, facts).ok
+
+
+def test_masking_a_name_does_not_licence_reusing_its_digits():
+    """The narrow hole, pinned so it stays narrow."""
+    facts = sheet(
+        Fact("peak_premium", 16.25, "EUR/MWh", "ENTSO-E A44"),
+        Fact("constrained_asset", "AT 2 400/220 SRM", "", "ENTSO-E A78"),
+    )
+    text = "The AT 2 400/220 SRM tripped and the border fell to 400 MW [A78]."
+    verdict = verify(text, facts)
+
+    assert not verdict.ok
+    assert [claim.value for claim in verdict.unsupported] == [400.0]
+
+
 def test_small_counting_numbers_do_not_fail_the_check():
     text = "The first of 2 constrained assets was named [ENTSO-E A78]."
     assert verify(text, standard()).ok
@@ -222,6 +274,19 @@ def test_the_sheet_only_allows_numbers_that_were_retrieved():
     assert facts.get("lowest_border_capacity").value == 3195.0
     # Never retrieved, and not derivable by the model either.
     assert 4200.0 not in allowed
+
+
+def test_the_settlement_interval_length_is_retrieved_not_invented():
+    """Every explanation wants to write "the single 15 minute interval"."""
+    facts = episode_facts(
+        build_episode(duration_hours=0.25, intervals=1), build_intervals()
+    )
+    minutes = facts.get("settlement_interval_minutes")
+
+    assert minutes is not None and minutes.value == 15
+    assert verify(
+        "The split lasted a single 15 minute interval [ENTSO-E A44].", facts
+    ).ok
 
 
 def test_a_missing_notice_becomes_a_caveat_rather_than_silence():

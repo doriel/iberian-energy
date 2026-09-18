@@ -44,8 +44,27 @@ _NUMBER = re.compile(
 )
 
 # Dates and clock times are quoted from the facts as text, and splitting them
-# into numbers would produce spurious failures on 2026, 09 and 18.
-_DATELIKE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?Z?)?|\d{1,2}:\d{2}")
+# into numbers would produce spurious failures on 2026, 09 and 18. Prose dates
+# have to be covered as well as ISO ones: a model writing "published on 25 June
+# 2026" is quoting a publication timestamp, not asserting that 25 and 2026 are
+# measurements, and treating them as claims rejected explanations that were
+# entirely faithful. Month names are matched case sensitively, so an ordinary
+# "may" followed by a figure is not swallowed.
+_MONTHS = (
+    r"(?:January|February|March|April|May|June|July|August|September|October"
+    r"|November|December)"
+)
+
+_DATELIKE = re.compile(
+    rf"""
+      \d{{4}}-\d{{2}}-\d{{2}}(?:[T ]\d{{2}}:\d{{2}}(?::\d{{2}})?Z?)?  # 2026-08-18T07:45Z
+    | \d{{1,2}}:\d{{2}}                                               # 07:45
+    | \b\d{{1,2}}\s+{_MONTHS}(?:\s+\d{{4}})?                          # 25 June 2026
+    | \b{_MONTHS}\s+\d{{4}}\b                                         # June 2026
+    | \b{_MONTHS}\s+\d{{1,2}}(?!\d)(?:,\s*\d{{4}})?                   # June 25, 2026
+    """,
+    re.VERBOSE,
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +117,34 @@ def extract_claims(text: str) -> list[Claim]:
     return claims
 
 
+def mask_retrieved_strings(text: str, sheet: FactSheet) -> str:
+    """Blank out retrieved names before looking for numbers.
+
+    Asset identifiers carry digits: `AT 2 400/220 SRM` is a transformer, and
+    400 and 220 are part of its name rather than quantities anyone measured.
+    Quoting it is precisely what the agent was asked to do, so the digits
+    inside a string that was itself retrieved are not claims.
+
+    The hole this opens is narrow and worth naming: a model could take a figure
+    out of an asset name and reuse it elsewhere as a measurement. Only values
+    that appear in the sheet as text are masked, and only where the text
+    reproduces them in full.
+    """
+    for fact in sheet.facts:
+        value = fact.value
+        if not isinstance(value, str) or len(value) < 3:
+            continue
+        if not any(character.isdigit() for character in value):
+            continue
+        text = re.sub(
+            re.escape(value),
+            lambda match: " " * len(match.group(0)),
+            text,
+            flags=re.IGNORECASE,
+        )
+    return text
+
+
 def _supports(allowed: float, claim: Claim) -> bool:
     """Is this retrieved value the one the writer meant?"""
     candidates = [allowed]
@@ -125,7 +172,7 @@ def verify(text: str, sheet: FactSheet, require_sources: bool = True) -> Verdict
     named in the text, because an explanation a reader cannot trace is not
     grounded even when every figure in it happens to be right.
     """
-    claims = extract_claims(text)
+    claims = extract_claims(mask_retrieved_strings(text, sheet))
     allowed = sheet.numbers()
 
     unsupported = [

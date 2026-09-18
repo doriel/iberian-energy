@@ -168,6 +168,11 @@ def main() -> int:
                 "missing_sources": result.verdict.missing_sources,
                 "numeric_claims": len(result.verdict.claims),
                 "text": result.text if result.ok else "",
+                # The draft that failed is the most useful row in the file and
+                # was the one thing not being kept: `text` was blanked and
+                # `rejected` excludes the final attempt. Without it a failure
+                # can only be guessed at from the offending figures.
+                "final_draft": "" if result.ok else result.text,
                 "rejected_drafts": result.rejected,
                 "true_cause": truth,
             }

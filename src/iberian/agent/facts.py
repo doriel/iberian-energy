@@ -133,6 +133,16 @@ def episode_facts(
 
     add("duration_hours", episode.get("duration_hours"), "hours", "derived from A44 prices")
     add("intervals", episode.get("intervals"), "settlement intervals", "ENTSO-E A44")
+
+    # The length of a settlement interval is a property of the market, not a
+    # figure the model should be inventing, and every explanation wants to say
+    # it: "the single 15 minute interval". Leaving it out of the sheet made a
+    # true and necessary sentence fail verification. It is read off the episode
+    # rather than assumed, because the resolution is not ours to decide.
+    count, hours = episode.get("intervals"), episode.get("duration_hours")
+    if pd.notna(count) and pd.notna(hours) and float(count) > 0:
+        add("settlement_interval_minutes", round(float(hours) * 60.0 / float(count)),
+            "minutes", "ENTSO-E A44 resolution")
     add("peak_premium", episode.get("peak_spread"), "EUR/MWh", "ENTSO-E A44 day-ahead")
     add("premium_side", episode.get("premium_side"), source="ENTSO-E A44 day-ahead")
     add("severity", episode.get("max_severity"), source="derived from the spread")
