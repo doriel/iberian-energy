@@ -53,6 +53,7 @@ later publication supersedes the earlier one.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -84,8 +85,24 @@ from iberian.analysis.market_splitting import (  # noqa: E402
     build_spread_series,
     flag_decoupling,
 )
+from iberian.analysis.validation import (  # noqa: E402
+    AGREEMENT_COLUMNS,
+    COST_COLUMNS,
+    cost_validation,
+    price_source_agreement,
+)
 from iberian.config import EIC_PORTUGAL, EIC_SPAIN  # noqa: E402
 from iberian.market_time import as_utc  # noqa: E402
+from iberian.ingestion.esios import (  # noqa: E402
+    GEO_PENINSULA,
+    IndicatorResponse,
+    congestion_rent_by_day,
+)
+from iberian.ingestion.esios import to_records as esios_to_records  # noqa: E402
+from iberian.ingestion.omie import parse_marginalpdbc  # noqa: E402
+from iberian.ingestion.omie import to_records as omie_to_records  # noqa: E402
+from iberian.ingestion.open_meteo import LOCATIONS, parse_hourly  # noqa: E402
+from iberian.ingestion.open_meteo import to_records as weather_to_records  # noqa: E402
 from iberian.parsing.entsoe_prices import (  # noqa: E402
     parse_day_ahead_prices,
     parse_quantity_series,
@@ -97,7 +114,7 @@ from iberian.pipeline.dedupe import (  # noqa: E402
     QUANTITY_KEYS,
     latest_per_key,
 )
-from iberian.pipeline.gold import gold_tables  # noqa: E402
+from iberian.pipeline.gold import gold_tables, gold_weather_context  # noqa: E402
 
 # Set these in the pipeline configuration rather than here, so the same file
 # runs against a personal schema and against the shared one without an edit.
@@ -472,3 +489,319 @@ def gold_daily_profile():
 @dp.expect("episode_has_intervals", "intervals > 0")
 def gold_split_episodes():
     return _gold("gold_split_episodes", EPISODE_SCHEMA)
+
+
+# --- the other three sources ------------------------------------------------
+#
+# ENTSO-E alone would make a working platform and a weaker one. OMIE publishes
+# the same day-ahead prices through a separate channel, which is what turns
+# "the prices are right" from an assertion into a measurement. ESIOS publishes
+# the congestion rent this project's cost figure is checked against. Open-Meteo
+# carries the reason Spanish power was cheap enough to be worth importing,
+# which no market document contains.
+#
+# They also differ in shape on purpose: XML over an API, columnar JSON,
+# delimited files published daily, each with its own idea of a timestamp.
+
+OMIE_SCHEMA = T.StructType(
+    [
+        T.StructField("source", T.StringType()),
+        T.StructField("market_day", T.DateType()),
+        T.StructField("period", T.IntegerType()),
+        T.StructField("ts_utc", T.TimestampType()),
+        T.StructField("price_first_eur_mwh", T.DoubleType()),
+        T.StructField("price_second_eur_mwh", T.DoubleType()),
+        T.StructField("landed_at", T.TimestampType()),
+    ]
+)
+
+WEATHER_VARIABLES = ("shortwave_radiation_wm2", "wind_speed_100m_kmh", "temperature_c")
+
+WEATHER_SCHEMA = T.StructType(
+    [
+        T.StructField("source", T.StringType()),
+        T.StructField("location", T.StringType()),
+        T.StructField("zone", T.StringType()),
+        T.StructField("latitude", T.DoubleType()),
+        T.StructField("longitude", T.DoubleType()),
+        T.StructField("ts_utc", T.TimestampType()),
+        T.StructField("market_day", T.DateType()),
+        T.StructField("temperature_c", T.DoubleType()),
+        T.StructField("wind_speed_100m_kmh", T.DoubleType()),
+        T.StructField("shortwave_radiation_wm2", T.DoubleType()),
+        T.StructField("cloud_cover_pct", T.DoubleType()),
+        T.StructField("landed_at", T.TimestampType()),
+    ]
+)
+
+ESIOS_SCHEMA = T.StructType(
+    [
+        T.StructField("indicator_id", T.IntegerType()),
+        T.StructField("indicator", T.StringType()),
+        T.StructField("ts_utc", T.TimestampType()),
+        T.StructField("market_day", T.DateType()),
+        T.StructField("value", T.DoubleType()),
+        T.StructField("geo_id", T.IntegerType()),
+        T.StructField("geo_name", T.StringType()),
+        T.StructField("resolution", T.StringType()),
+        T.StructField("landed_at", T.TimestampType()),
+    ]
+)
+
+#: Keys for resolving a re-landed file. OMIE republishes a corrected day under
+#: the same name, and the weather archive supersedes the forecast for the same
+#: hour, so both need the same treatment the ENTSO-E documents get.
+OMIE_KEYS = ("ts_utc",)
+WEATHER_KEYS = ("location", "ts_utc")
+ESIOS_KEYS = ("indicator_id", "ts_utc", "geo_id")
+
+
+# --- bronze -----------------------------------------------------------------
+
+
+@dp.table(
+    name="bronze_omie",
+    comment="OMIE day-ahead files exactly as published.",
+    table_properties={"quality": "bronze"},
+)
+def bronze_omie():
+    # No extension to filter on: OMIE names its files marginalpdbc_20260719.1,
+    # where the suffix is a version rather than a type.
+    return _landing("omie", "omie", pattern="*")
+
+
+@dp.table(
+    name="bronze_open_meteo",
+    comment="Open-Meteo hourly payloads, one per location and window.",
+    table_properties={"quality": "bronze"},
+)
+def bronze_open_meteo():
+    return _landing("open_meteo", "open_meteo", pattern="*.json").withColumn(
+        "location", F.regexp_extract("path", r"location=([^/]+)", 1)
+    )
+
+
+@dp.table(
+    name="bronze_esios",
+    comment="REE ESIOS indicator payloads, one per indicator and window.",
+    table_properties={"quality": "bronze"},
+)
+def bronze_esios():
+    # The indicator is in the path because the payload names it by id and the
+    # id alone says nothing to a reader of the table.
+    return _landing("esios", "esios", pattern="*.json").withColumn(
+        "indicator_id", F.regexp_extract("path", r"indicator=(\d+)", 1).cast("int")
+    )
+
+
+# --- silver -----------------------------------------------------------------
+
+
+def _parse_omie(batches):
+    for batch in batches:
+        rows: list[dict] = []
+        for _, document in batch.iterrows():
+            text = bytes(document["content"]).decode("latin-1")
+            landed = document["landed_at"]
+            rows.extend(
+                {**row, "landed_at": landed}
+                for row in omie_to_records(parse_marginalpdbc(text))
+            )
+        yield pd.DataFrame(rows, columns=OMIE_SCHEMA.fieldNames())
+
+
+def _parse_weather(batches):
+    for batch in batches:
+        rows: list[dict] = []
+        for _, document in batch.iterrows():
+            location = document["location"]
+            if location not in LOCATIONS:
+                continue
+            latitude, longitude, _ = LOCATIONS[location]
+            payload = json.loads(bytes(document["content"]).decode("utf-8"))
+            landed = document["landed_at"]
+            points = parse_hourly(payload, location, latitude, longitude)
+            rows.extend(
+                {**row, "landed_at": landed} for row in weather_to_records(points)
+            )
+        yield pd.DataFrame(rows, columns=WEATHER_SCHEMA.fieldNames())
+
+
+def _parse_esios(batches):
+    for batch in batches:
+        rows: list[dict] = []
+        for _, document in batch.iterrows():
+            response = IndicatorResponse(
+                indicator_id=int(document["indicator_id"]),
+                content=bytes(document["content"]),
+            )
+            landed = document["landed_at"]
+            rows.extend(
+                {**row, "landed_at": landed}
+                for row in esios_to_records(response, geo_id=GEO_PENINSULA)
+            )
+        yield pd.DataFrame(rows, columns=ESIOS_SCHEMA.fieldNames())
+
+
+@dp.table(
+    name="silver_omie_prices",
+    comment="Day-ahead prices as published by OMIE, for cross source validation.",
+    table_properties={"quality": "silver"},
+)
+@dp.expect_or_drop("has_timestamp", "ts_utc IS NOT NULL")
+@dp.expect("period_is_within_a_day", "period BETWEEN 1 AND 100")
+def silver_omie_prices():
+    return dp.read_stream("bronze_omie").mapInPandas(_parse_omie, schema=OMIE_SCHEMA)
+
+
+@dp.table(
+    name="silver_weather",
+    comment="Hourly weather at locations chosen for their effect on price.",
+    table_properties={"quality": "silver"},
+)
+@dp.expect_or_drop("has_timestamp", "ts_utc IS NOT NULL")
+@dp.expect_or_drop("has_location", "location IS NOT NULL")
+# Radiation at night is zero, not missing, and a negative value would mean the
+# parser lined the arrays up wrongly rather than that the sun misbehaved.
+@dp.expect("radiation_is_not_negative", "shortwave_radiation_wm2 >= 0")
+def silver_weather():
+    return dp.read_stream("bronze_open_meteo").mapInPandas(
+        _parse_weather, schema=WEATHER_SCHEMA
+    )
+
+
+@dp.table(
+    name="silver_esios_indicators",
+    comment="REE ESIOS indicators: congestion rent, demand forecast and actual.",
+    table_properties={"quality": "silver"},
+)
+@dp.expect_or_drop("has_timestamp", "ts_utc IS NOT NULL")
+@dp.expect("peninsula_only", f"geo_id = {GEO_PENINSULA}")
+def silver_esios_indicators():
+    return dp.read_stream("bronze_esios").mapInPandas(
+        _parse_esios, schema=ESIOS_SCHEMA
+    )
+
+
+# --- gold: context and the two validations ----------------------------------
+#
+# These take two inputs rather than one, so they use `cogroup` instead of the
+# stacking trick above. The key is a constant for the same reason: the work is
+# a few thousand rows and correctness across the whole series matters more than
+# parallelism that buys nothing.
+
+WEATHER_CONTEXT_SCHEMA = T.StructType(
+    list(INTERVAL_SCHEMA.fields)
+    + [
+        T.StructField(f"{variable}__{location}", T.DoubleType())
+        for variable in WEATHER_VARIABLES
+        for location in sorted(LOCATIONS)
+    ]
+    + [T.StructField("weather_resolution", T.StringType())]
+)
+
+AGREEMENT_SCHEMA = T.StructType(
+    [
+        T.StructField("ts_utc", T.TimestampType()),
+        T.StructField("market_day", T.DateType()),
+        T.StructField("price_pt_entsoe", T.DoubleType()),
+        T.StructField("price_pt_omie", T.DoubleType()),
+        T.StructField("price_es_entsoe", T.DoubleType()),
+        T.StructField("price_es_omie", T.DoubleType()),
+        T.StructField("pt_difference", T.DoubleType()),
+        T.StructField("es_difference", T.DoubleType()),
+        T.StructField("agrees", T.BooleanType()),
+    ]
+)
+
+COST_SCHEMA = T.StructType(
+    [
+        T.StructField("market_day", T.DateType()),
+        T.StructField("episodes", T.IntegerType()),
+        T.StructField("our_cost_eur", T.DoubleType()),
+        T.StructField("congestion_rent_eur", T.DoubleType()),
+        T.StructField("difference_eur", T.DoubleType()),
+        T.StructField("difference_pct", T.DoubleType()),
+    ]
+)
+
+
+def _conform(frame: pd.DataFrame, schema: T.StructType) -> pd.DataFrame:
+    """Give Spark exactly the columns it was promised, in order.
+
+    A location that published nothing leaves its pivoted columns absent rather
+    than null, and a schema mismatch inside `applyInPandas` surfaces as an
+    arrow conversion error that names none of this.
+    """
+    out = frame.copy() if not frame.empty else pd.DataFrame(columns=schema.fieldNames())
+    for field in schema.fields:
+        if field.name not in out.columns:
+            out[field.name] = None
+    return out[schema.fieldNames()]
+
+
+def _pair(left_name: str, right_name: str, function, schema: T.StructType):
+    """Cogroup two tables under one key and hand both frames to a function."""
+    left = dp.read(left_name).groupBy(F.lit(1).alias("all"))
+    right = dp.read(right_name).groupBy(F.lit(1).alias("all"))
+    return left.cogroup(right).applyInPandas(function, schema=schema)
+
+
+@dp.materialized_view(
+    name="gold_weather_context",
+    comment="Persona 2 and 3: interval premiums beside the weather that drove them.",
+    table_properties={"quality": "gold"},
+)
+def gold_weather_context_table():
+    def build(intervals: pd.DataFrame, weather: pd.DataFrame) -> pd.DataFrame:
+        intervals = as_utc(intervals, "ts_utc")
+        weather = latest_per_key(as_utc(weather, "ts_utc", "landed_at"), WEATHER_KEYS)
+        return _conform(
+            gold_weather_context(intervals, weather), WEATHER_CONTEXT_SCHEMA
+        )
+
+    return _pair(
+        "gold_interval_premium", "silver_weather", build, WEATHER_CONTEXT_SCHEMA
+    )
+
+
+@dp.materialized_view(
+    name="gold_price_source_agreement",
+    comment="Do ENTSO-E and OMIE publish the same day-ahead price, interval by interval.",
+    table_properties={"quality": "gold"},
+)
+# The check is worth nothing if a disagreement passes quietly. This does not
+# fail the table, because a disagreement is a finding to report rather than a
+# reason to withhold the data, but it does surface in the pipeline's metrics.
+@dp.expect("sources_agree", "agrees")
+def gold_price_source_agreement():
+    def build(prices: pd.DataFrame, omie: pd.DataFrame) -> pd.DataFrame:
+        prices = latest_per_key(as_utc(prices, "ts_utc", "landed_at"), PRICE_KEYS)
+        omie = latest_per_key(as_utc(omie, "ts_utc", "landed_at"), OMIE_KEYS)
+        if prices.empty or omie.empty:
+            return _conform(pd.DataFrame(), AGREEMENT_SCHEMA)
+        spread = build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN)
+        return _conform(price_source_agreement(spread, omie), AGREEMENT_SCHEMA)
+
+    return _pair(
+        "silver_entsoe_prices", "silver_omie_prices", build, AGREEMENT_SCHEMA
+    )
+
+
+@dp.materialized_view(
+    name="gold_cost_validation",
+    comment="This project's extra import cost against REE's published congestion rent.",
+    table_properties={"quality": "gold"},
+)
+def gold_cost_validation():
+    def build(episodes: pd.DataFrame, esios: pd.DataFrame) -> pd.DataFrame:
+        esios = latest_per_key(as_utc(esios, "ts_utc", "landed_at"), ESIOS_KEYS)
+        rent = congestion_rent_by_day(esios) if not esios.empty else pd.DataFrame()
+        return _conform(
+            cost_validation(as_utc(episodes, "start_utc", "end_utc"), rent),
+            COST_SCHEMA,
+        )
+
+    return _pair(
+        "gold_split_episodes", "silver_esios_indicators", build, COST_SCHEMA
+    )
