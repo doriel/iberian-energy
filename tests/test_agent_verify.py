@@ -195,6 +195,24 @@ def test_negative_numbers_are_checked_too():
     assert not verify("The spread was -31.5 EUR/MWh [A44].", facts).ok
 
 
+def test_a_typographic_minus_sign_is_still_a_negative_number():
+    """Negative prices are normal here, and models type U+2212 for them."""
+    facts = sheet(
+        Fact("price_es_at_peak", -0.07, "EUR/MWh", "ENTSO-E A44"),
+        Fact("price_pt_at_peak", -0.01, "EUR/MWh", "ENTSO-E A44"),
+    )
+    text = "Portugal traded at −0.01 EUR/MWh and Spain at −0.07 [A44]."
+    assert verify(text, facts).ok
+
+
+def test_an_em_dash_between_clauses_is_not_a_sign():
+    text = (
+        "The premium reached 109.84 EUR/MWh [ENTSO-E A44]—a severe "
+        "separation—while capacity held at 3,195 MW."
+    )
+    assert verify(text, standard()).ok
+
+
 def test_verdict_names_what_failed():
     text = "Capacity was 4200 MW and the premium 109.84 EUR/MWh [A44]."
     assert "4200" in verify(text, standard()).describe()

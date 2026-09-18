@@ -93,9 +93,16 @@ class Verdict:
         return f"Unsupported: {bad}"
 
 
+#: A model writing a negative price often reaches for the typographic minus
+#: sign rather than the hyphen. "−0.07 EUR/MWh" is the retrieved -0.07, and
+#: reading it as +0.07 rejected a faithful explanation of a negative Spanish
+#: price, which is an ordinary event in this market rather than an oddity.
+_MINUS_SIGNS = str.maketrans({"−": "-"})
+
+
 def extract_claims(text: str) -> list[Claim]:
     """Every number a reader would take as a factual assertion."""
-    masked = _DATELIKE.sub(lambda m: " " * len(m.group(0)), text)
+    masked = _DATELIKE.sub(lambda m: " " * len(m.group(0)), text.translate(_MINUS_SIGNS))
 
     claims: list[Claim] = []
     for match in _NUMBER.finditer(masked):
