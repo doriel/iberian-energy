@@ -248,17 +248,140 @@ def silver_entsoe_capacity():
 
 
 # --- gold: the three persona tables -----------------------------------------
+#
+# Everything below is lazy on purpose, and the first version of this file was
+# not. Calling `.toPandas()` inside a table function runs while the graph is
+# being built, before the upstream tables exist, so gold was computed from
+# whatever the previous run had left behind. On an empty workspace that raises;
+# on a populated one it silently produces yesterday's answer, which is worse.
+#
+# `applyInPandas` keeps the same pandas functions and makes them part of the
+# plan rather than a side effect of defining it. The grouping key is a constant
+# so the whole series arrives as one frame: episode grouping is sequential, and
+# an episode that runs past local midnight has to stay one episode. The natural
+# key if this ever needs to scale is `market_day`, at the cost of splitting
+# those crossing episodes in two, which at 60 days and a few thousand rows buys
+# nothing today.
+
+INTERVAL_SCHEMA = T.StructType(
+    [
+        T.StructField("ts_utc", T.TimestampType()),
+        T.StructField("price_pt_eur_mwh", T.DoubleType()),
+        T.StructField("price_es_eur_mwh", T.DoubleType()),
+        T.StructField("premium_eur_mwh", T.DoubleType()),
+        T.StructField("abs_premium_eur_mwh", T.DoubleType()),
+        T.StructField("is_decoupled", T.BooleanType()),
+        T.StructField("premium_side", T.StringType()),
+        T.StructField("severity", T.StringType()),
+        T.StructField("net_flow_mw", T.DoubleType()),
+        T.StructField("capacity_mw", T.DoubleType()),
+        T.StructField("utilisation", T.DoubleType()),
+        T.StructField("is_saturated", T.BooleanType()),
+        T.StructField("market_day", T.DateType()),
+        T.StructField("hour_of_day_utc", T.IntegerType()),
+    ]
+)
+
+PROFILE_SCHEMA = T.StructType(
+    [
+        T.StructField("hour_of_day_utc", T.IntegerType()),
+        T.StructField("intervals", T.LongType()),
+        T.StructField("decoupled_intervals", T.LongType()),
+        T.StructField("mean_premium_eur_mwh", T.DoubleType()),
+        T.StructField("worst_premium_eur_mwh", T.DoubleType()),
+        T.StructField("split_probability", T.DoubleType()),
+        T.StructField("mean_utilisation", T.DoubleType()),
+        T.StructField("mean_capacity_mw", T.DoubleType()),
+    ]
+)
+
+EPISODE_SCHEMA = T.StructType(
+    [
+        T.StructField("episode_id", T.LongType()),
+        T.StructField("start_utc", T.TimestampType()),
+        T.StructField("end_utc", T.TimestampType()),
+        T.StructField("intervals", T.LongType()),
+        T.StructField("duration_hours", T.DoubleType()),
+        T.StructField("mean_spread", T.DoubleType()),
+        T.StructField("max_abs_spread", T.DoubleType()),
+        T.StructField("peak_spread", T.DoubleType()),
+        T.StructField("premium_side", T.StringType()),
+        T.StructField("max_severity", T.StringType()),
+        T.StructField("market_day", T.DateType()),
+        T.StructField("extra_cost_eur", T.DoubleType()),
+        T.StructField("share_saturated", T.DoubleType()),
+        T.StructField("explained_by_saturation", T.BooleanType()),
+    ]
+)
 
 
-def _build_gold() -> dict[str, pd.DataFrame]:
-    """The same call the local build makes, on the same functions."""
-    prices = dp.read("silver_entsoe_prices").toPandas()
-    schedules = dp.read("silver_entsoe_schedules").toPandas()
-    capacity = dp.read("silver_entsoe_capacity").toPandas()
+def _events():
+    """The three silver tables as one long frame.
+
+    `applyInPandas` takes one input, and gold needs three. Stacking them with a
+    `kind` column and splitting them back inside the function keeps the plan
+    lazy without inventing a second way to build gold.
+    """
+    prices = dp.read("silver_entsoe_prices").select(
+        F.lit("price").alias("kind"),
+        F.col("ts_utc"),
+        F.col("zone_eic"),
+        F.col("price_eur_mwh").alias("value"),
+        F.col("resolution"),
+        F.lit(None).cast("string").alias("in_domain"),
+        F.lit(None).cast("string").alias("out_domain"),
+    )
+
+    def quantities(table: str, kind: str):
+        return dp.read(table).select(
+            F.lit(kind).alias("kind"),
+            F.col("ts_utc"),
+            F.lit(None).cast("string").alias("zone_eic"),
+            F.col("quantity_mw").alias("value"),
+            F.col("resolution"),
+            F.col("in_domain"),
+            F.col("out_domain"),
+        )
+
+    return (
+        prices.unionByName(quantities("silver_entsoe_schedules", "schedule"))
+        .unionByName(quantities("silver_entsoe_capacity", "capacity"))
+    )
+
+
+def _rebuild(events: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Split the stacked frame back apart and call the tested functions."""
+    prices = events[events["kind"] == "price"].rename(
+        columns={"value": "price_eur_mwh"}
+    )
+    schedules = events[events["kind"] == "schedule"].rename(
+        columns={"value": "quantity_mw"}
+    )
+    capacity = events[events["kind"] == "capacity"].rename(
+        columns={"value": "quantity_mw"}
+    )
 
     flagged = flag_decoupling(build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN))
     border = build_border_series(schedules, capacity, (EIC_SPAIN, EIC_PORTUGAL))
     return gold_tables(flagged, border)
+
+
+def _one_table(name: str, schema: T.StructType):
+    """Build every gold table and return the one asked for, with its columns."""
+
+    def build(events: pd.DataFrame) -> pd.DataFrame:
+        frame = _rebuild(events).get(name, pd.DataFrame())
+        if frame.empty:
+            return pd.DataFrame(columns=schema.fieldNames())
+        return frame[schema.fieldNames()]
+
+    return build
+
+
+def _gold(name: str, schema: T.StructType):
+    return _events().groupBy(F.lit(1).alias("all")).applyInPandas(
+        _one_table(name, schema), schema=schema
+    )
 
 
 @dp.materialized_view(
@@ -267,7 +390,7 @@ def _build_gold() -> dict[str, pd.DataFrame]:
     table_properties={"quality": "gold"},
 )
 def gold_interval_premium():
-    return spark.createDataFrame(_build_gold()["gold_interval_premium"])  # noqa: F821
+    return _gold("gold_interval_premium", INTERVAL_SCHEMA)
 
 
 @dp.materialized_view(
@@ -276,7 +399,7 @@ def gold_interval_premium():
     table_properties={"quality": "gold"},
 )
 def gold_daily_profile():
-    return spark.createDataFrame(_build_gold()["gold_daily_profile"])  # noqa: F821
+    return _gold("gold_daily_profile", PROFILE_SCHEMA)
 
 
 @dp.materialized_view(
@@ -289,4 +412,4 @@ def gold_daily_profile():
 @dp.expect("episode_has_duration", "duration_hours > 0")
 @dp.expect("episode_has_intervals", "intervals > 0")
 def gold_split_episodes():
-    return spark.createDataFrame(_build_gold()["gold_split_episodes"])  # noqa: F821
+    return _gold("gold_split_episodes", EPISODE_SCHEMA)
