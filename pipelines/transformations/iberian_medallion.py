@@ -576,8 +576,12 @@ def bronze_omie():
     table_properties={"quality": "bronze"},
 )
 def bronze_open_meteo():
-    return _landing("open_meteo", "open_meteo", pattern="*.json").withColumn(
-        "location", F.regexp_extract("path", r"location=([^/]+)", 1)
+    # Same guard as the ESIOS catalogue: anything under this prefix without a
+    # `location=` folder is not an observation from a place.
+    return (
+        _landing("open_meteo", "open_meteo", pattern="*.json")
+        .withColumn("location", F.regexp_extract("path", r"location=([^/]+)", 1))
+        .where(F.col("location") != "")
     )
 
 
@@ -589,8 +593,18 @@ def bronze_open_meteo():
 def bronze_esios():
     # The indicator is in the path because the payload names it by id and the
     # id alone says nothing to a reader of the table.
-    return _landing("esios", "esios", pattern="*.json").withColumn(
-        "indicator_id", F.regexp_extract("path", r"indicator=(\d+)", 1).cast("int")
+    #
+    # The landing zone also holds `indicators.json`, the catalogue of every
+    # indicator ESIOS publishes, which is a reference document rather than a
+    # measurement and has no `indicator=` folder. Dropping it by the absence of
+    # that folder is deliberate: with ANSI mode on, casting its empty match to
+    # an integer fails the whole stream, which is the right behaviour and the
+    # reason this is a filter rather than a silent null.
+    return (
+        _landing("esios", "esios", pattern="*.json")
+        .withColumn("indicator_id", F.regexp_extract("path", r"indicator=(\d+)", 1))
+        .where(F.col("indicator_id") != "")
+        .withColumn("indicator_id", F.col("indicator_id").cast("int"))
     )
 
 
