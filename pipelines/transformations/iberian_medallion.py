@@ -36,13 +36,19 @@ stitched over. That is not expressible as an append-only stream, and forcing it
 would produce episode durations that are quietly wrong. A full recompute of
 sixty market days is a few thousand rows and takes seconds.
 
-Gold is computed through pandas on the driver for the same reason. The
-alternative is rewriting detection, grouping and saturation in PySpark, which
-means maintaining a second implementation of logic that is already validated to
-0.0015% against REE's published congestion rent. At this volume that trade
-buys nothing. If the gold input ever outgrows the driver, the honest fix is to
-partition the recompute by market day, which the arithmetic already allows
-because episodes never cross the market day boundary.
+Gold runs the pandas functions through `applyInPandas` rather than collecting
+to the driver. The alternative is rewriting detection, grouping and saturation
+in PySpark, which means maintaining a second implementation of logic already
+validated to 0.0015% against REE's published congestion rent, and at this
+volume that trade buys nothing.
+
+One difference between here and the local build is worth stating, because it
+caused a real failure rather than a theoretical one. The local build parses the
+responses it just requested. The pipeline reads a landing zone that keeps every
+file it was ever given, so overlapping backfills deliver the same settlement
+interval twice and the duplicate guard in `build_spread_series` refuses to pick
+one. `pipeline.dedupe` resolves it the way the transparency platform does: the
+later publication supersedes the earlier one.
 """
 
 from __future__ import annotations
@@ -85,6 +91,11 @@ from iberian.parsing.entsoe_prices import (  # noqa: E402
     quantities_to_records,
     to_records,
 )
+from iberian.pipeline.dedupe import (  # noqa: E402
+    PRICE_KEYS,
+    QUANTITY_KEYS,
+    latest_per_key,
+)
 from iberian.pipeline.gold import gold_tables  # noqa: E402
 
 # Set these in the pipeline configuration rather than here, so the same file
@@ -107,6 +118,9 @@ PRICE_SCHEMA = T.StructType(
         T.StructField("market", T.StringType()),
         T.StructField("contract_type", T.StringType()),
         T.StructField("series_mrid", T.StringType()),
+        # Carried through from the file's modification time in the Volume, so
+        # that a republished document can be told from the one it supersedes.
+        T.StructField("landed_at", T.TimestampType()),
     ]
 )
 
@@ -119,6 +133,7 @@ QUANTITY_SCHEMA = T.StructType(
         T.StructField("label", T.StringType()),
         T.StructField("in_domain", T.StringType()),
         T.StructField("out_domain", T.StringType()),
+        T.StructField("landed_at", T.TimestampType()),
     ]
 )
 
@@ -187,7 +202,11 @@ def _parse_prices(batches):
                 else EIC_SPAIN
             )
             body = bytes(document["content"]).decode("utf-8")
-            rows.extend(to_records(parse_day_ahead_prices(body, zone)))
+            landed = document["landed_at"]
+            rows.extend(
+                {**row, "landed_at": landed}
+                for row in to_records(parse_day_ahead_prices(body, zone))
+            )
         yield pd.DataFrame(rows, columns=PRICE_SCHEMA.fieldNames())
 
 
@@ -197,7 +216,11 @@ def _parse_quantities(label: str):
             rows: list[dict] = []
             for _, document in batch.iterrows():
                 body = bytes(document["content"]).decode("utf-8")
-                rows.extend(quantities_to_records(parse_quantity_series(body), label))
+                landed = document["landed_at"]
+                rows.extend(
+                    {**row, "landed_at": landed}
+                    for row in quantities_to_records(parse_quantity_series(body), label)
+                )
             yield pd.DataFrame(rows, columns=QUANTITY_SCHEMA.fieldNames())
 
     return parse
@@ -330,6 +353,8 @@ def _events():
         F.col("resolution"),
         F.lit(None).cast("string").alias("in_domain"),
         F.lit(None).cast("string").alias("out_domain"),
+        F.col("market"),
+        F.col("landed_at"),
     )
 
     def quantities(table: str, kind: str):
@@ -341,6 +366,8 @@ def _events():
             F.col("resolution"),
             F.col("in_domain"),
             F.col("out_domain"),
+            F.lit(None).cast("string").alias("market"),
+            F.col("landed_at"),
         )
 
     return (
@@ -360,6 +387,14 @@ def _rebuild(events: pd.DataFrame) -> dict[str, pd.DataFrame]:
     capacity = events[events["kind"] == "capacity"].rename(
         columns={"value": "quantity_mw"}
     )
+
+    # The landing zone keeps every file it was ever given, so overlapping
+    # backfills put the same interval in two documents. The local build never
+    # sees this because it parses the responses it just asked for. Later
+    # publication wins, which is how a correction is meant to be read.
+    prices = latest_per_key(prices, PRICE_KEYS)
+    schedules = latest_per_key(schedules, QUANTITY_KEYS)
+    capacity = latest_per_key(capacity, QUANTITY_KEYS)
 
     flagged = flag_decoupling(build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN))
     border = build_border_series(schedules, capacity, (EIC_SPAIN, EIC_PORTUGAL))
