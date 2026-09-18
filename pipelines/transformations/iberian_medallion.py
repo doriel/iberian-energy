@@ -141,17 +141,23 @@ QUANTITY_SCHEMA = T.StructType(
 )
 
 
-def _landing(folder: str, name: str):
+def _landing(folder: str, name: str, pattern: str = "*.xml"):
     """Auto Loader over one raw folder, keeping the payload byte for byte.
 
     `name` is only the checkpoint's own directory. Deriving it from the folder
     would put an `=` from a partition path into the schema location, which is
     legal and unreadable.
+
+    `pattern` matters more than it looks. The landing zone holds the request
+    metadata beside the response it describes, and a `_request.json` handed to
+    an XML parser fails in a way that reads like a corrupt document rather than
+    a file that was never meant to be parsed.
     """
     return (
         spark.readStream.format("cloudFiles")  # noqa: F821
         .option("cloudFiles.format", "binaryFile")
         .option("cloudFiles.schemaLocation", f"{RAW}/_schemas/{name}")
+        .option("pathGlobFilter", pattern)
         .load(f"{RAW}/{folder}")
         .select(
             F.col("path"),
