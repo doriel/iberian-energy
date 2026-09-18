@@ -4,32 +4,40 @@
 # environment_version = "5"
 # ///
 # MAGIC %md
-# MAGIC # MIBEL market intelligence: medallion build
+# MAGIC # MIBEL market intelligence: ingestion
 # MAGIC
-# MAGIC Ingests Iberian electricity market data into a bronze, silver and gold
-# MAGIC lakehouse on Unity Catalog.
+# MAGIC Fetches Iberian electricity market data and lands the payloads, byte for
+# MAGIC byte, in a Unity Catalog Volume. It writes no tables.
 # MAGIC
-# MAGIC | Layer | What it holds |
+# MAGIC That division is deliberate and it changed. This notebook used to build
+# MAGIC silver and gold as well, which was fine while it was the only thing
+# MAGIC running. It is not any more: the Lakeflow declarative pipeline in
+# MAGIC `pipelines/transformations/` now owns every table from bronze onwards,
+# MAGIC and a declarative pipeline only manages tables it created. Two writers
+# MAGIC on one table name means the pipeline refuses to run, and worse, it means
+# MAGIC two implementations of the same transformation drifting apart until a
+# MAGIC number on a page cannot be reproduced.
+# MAGIC
+# MAGIC So the split is:
+# MAGIC
+# MAGIC | Here | In the pipeline |
 # MAGIC |---|---|
-# MAGIC | Bronze | API payloads byte for byte in a Volume, nothing interpreted |
-# MAGIC | Silver | One Delta table per source, parsed but without business logic |
-# MAGIC | Gold | Market splitting episodes, interval premiums, daily profile |
+# MAGIC | Call the APIs | Read the Volume with Auto Loader |
+# MAGIC | Land the bytes unmodified | Parse into silver, build gold |
+# MAGIC | Nothing else | Everything else |
 # MAGIC
-# MAGIC Three sources, deliberately different in shape: ENTSO-E is XML over an
-# MAGIC API, Open-Meteo is columnar JSON, OMIE is delimited files published
-# MAGIC daily. Two of them publish the same day-ahead prices independently,
-# MAGIC which gives a cross-source data quality check rather than a claim.
+# MAGIC Landing the raw bytes rather than parsed rows is what makes a parser fix
+# MAGIC a reprocess of stored payloads instead of another call against a rate
+# MAGIC limited API. It is also what let sixty market days be rebuilt from disk
+# MAGIC without asking ENTSO-E for any of it again.
 # MAGIC
-# MAGIC The ingestion and analysis logic lives in `src/iberian/` as plain Python
+# MAGIC **Run order**: this notebook, then the `Iberian_01` pipeline. As a Job,
+# MAGIC two tasks with the pipeline depending on this one.
+# MAGIC
+# MAGIC The ingestion and parsing logic lives in `src/iberian/` as plain Python
 # MAGIC with no Databricks imports, so the same functions run in a local test
-# MAGIC suite in under two seconds and inside this notebook unchanged. This
-# MAGIC notebook is an orchestration and persistence layer, not a place where
-# MAGIC logic is reimplemented.
-# MAGIC
-# MAGIC **Prerequisites**: attach this notebook to a cluster, set the widgets at
-# MAGIC the top, and store the ENTSO-E token in a secret scope. Writes are
-# MAGIC idempotent per market day via Delta `replaceWhere`, so re-running a date
-# MAGIC range repairs it rather than duplicating it.
+# MAGIC suite in under two seconds and here unchanged. This notebook is
+# MAGIC orchestration, not a place where logic is reimplemented.
 
 # COMMAND ----------
 
@@ -44,13 +52,14 @@
 # MAGIC Run this cell once to create the widgets, fill them in at the top of the
 # MAGIC notebook, then run it again so the values are picked up.
 # MAGIC
-# MAGIC The token is read from a secret scope rather than a widget so it never
-# MAGIC lands in the notebook's saved state or in the repo. Create one with the
-# MAGIC CLI if you have not already:
+# MAGIC Tokens come from a secret scope, never from a widget. A widget's value is
+# MAGIC saved with the notebook state, and this repository is public. Create the
+# MAGIC scope once with the CLI:
 # MAGIC
 # MAGIC ```
-# MAGIC databricks secrets create-scope mibel
-# MAGIC databricks secrets put-secret mibel entsoe_token --string-value "<token>"
+# MAGIC databricks secrets create-scope iberian
+# MAGIC databricks secrets put-secret iberian entsoe_token
+# MAGIC databricks secrets put-secret iberian esios_token
 # MAGIC ```
 
 # COMMAND ----------
@@ -65,44 +74,64 @@ dbutils.widgets.text("schema", "doriel", "Schema")
 dbutils.widgets.text("volume", "raw", "Volume for bronze")
 dbutils.widgets.text("start_day", "2026-09-01", "First market day (YYYY-MM-DD)")
 dbutils.widgets.text("days", "7", "Number of market days")
-dbutils.widgets.text("secret_scope", "mibel", "Secret scope")
-dbutils.widgets.text("secret_key", "entsoe_token", "Secret key for the ENTSO-E token")
+dbutils.widgets.text("secret_scope", "iberian", "Secret scope")
 
 CATALOG = dbutils.widgets.get("catalog").strip()
 SCHEMA = dbutils.widgets.get("schema").strip()
 VOLUME = dbutils.widgets.get("volume").strip()
 START_DAY = dbutils.widgets.get("start_day").strip()
 DAYS = int(dbutils.widgets.get("days"))
+SCOPE = dbutils.widgets.get("secret_scope").strip()
 
 if not CATALOG:
     raise ValueError(
         "Set the catalog widget. Run SHOW CATALOGS to see what you can write to."
     )
 
-ENTSOE_TOKEN = dbutils.secrets.get(
-    scope=dbutils.widgets.get("secret_scope"),
-    key=dbutils.widgets.get("secret_key"),
-)
-
 VOLUME_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
 print(f"Target   {CATALOG}.{SCHEMA}")
-print(f"Bronze   {VOLUME_ROOT}")
+print(f"Landing  {VOLUME_ROOT}")
 print(f"Window   {DAYS} market day(s) from {START_DAY}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Credentials
+# MAGIC
+# MAGIC The modules under `src/iberian/` read their tokens from the environment,
+# MAGIC and that is all they know. What differs between a laptop and this
+# MAGIC workspace is only who puts the values there: a gitignored `.env` locally,
+# MAGIC a secret scope here. Setting the environment at this boundary means there
+# MAGIC is one authentication path to maintain rather than two.
+# MAGIC
+# MAGIC Never print a secret. Databricks tries to redact them from cell output,
+# MAGIC but that protection is defeated by anything as simple as printing the
+# MAGIC characters one at a time. Print the length if you need to check it is set.
+
+# COMMAND ----------
+
+import os
+
+os.environ["ENTSOE_SECURITY_TOKEN"] = dbutils.secrets.get(scope=SCOPE, key="entsoe_token")
+os.environ["ESIOS_TOKEN"] = dbutils.secrets.get(scope=SCOPE, key="esios_token")
+
+for name in ("ENTSOE_SECURITY_TOKEN", "ESIOS_TOKEN"):
+    value = os.environ.get(name, "")
+    print(f"  {name:<24} {'set, ' + str(len(value)) + ' characters' if value else 'MISSING'}")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Catalog objects
 # MAGIC
-# MAGIC Created if missing so a fresh workspace can run this notebook end to end.
+# MAGIC Only the Volume is created here. The schema has to exist for the Volume
+# MAGIC to live in it, but no table is created: those belong to the pipeline.
 
 # COMMAND ----------
 
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.{VOLUME}")
-spark.sql(f"USE CATALOG {CATALOG}")
-spark.sql(f"USE SCHEMA {SCHEMA}")
-print(f"Ready: {CATALOG}.{SCHEMA}, volume {VOLUME}")
+print(f"Ready: volume {VOLUME} in {CATALOG}.{SCHEMA}")
 
 # COMMAND ----------
 
@@ -110,13 +139,12 @@ print(f"Ready: {CATALOG}.{SCHEMA}, volume {VOLUME}")
 # MAGIC ## Import the project modules
 # MAGIC
 # MAGIC This notebook sits in `pipelines/` inside the Git folder, so the package
-# MAGIC is two levels up under `src/`. Importing rather than copying is what
-# MAGIC keeps the logic covered by the test suite: if a function changes, the
-# MAGIC tests catch it before this notebook ever runs.
+# MAGIC is one level up under `src/`. Importing rather than copying is what keeps
+# MAGIC the logic covered by the test suite: if a function changes, the tests
+# MAGIC catch it before this notebook ever runs.
 
 # COMMAND ----------
 
-import os
 import sys
 
 # Inside a Git folder the working directory is the notebook's own directory,
@@ -151,33 +179,21 @@ print(f"Package imported from {os.path.dirname(iberian.__file__)}")
 
 # COMMAND ----------
 
+import json  # noqa: E402
+import tempfile  # noqa: E402
 from datetime import date, timedelta  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-import pandas as pd  # noqa: E402
-
-from iberian.analysis.interconnection import build_border_series  # noqa: E402
-from iberian.analysis.market_splitting import (  # noqa: E402
-    build_spread_series,
-    flag_decoupling,
-    infer_step,
-)
-from iberian.config import EIC_PORTUGAL, EIC_SPAIN  # noqa: E402
+from iberian.config import EIC_PORTUGAL, EIC_SPAIN, Settings  # noqa: E402
 from iberian.ingestion.border import fetch_border  # noqa: E402
 from iberian.ingestion.entsoe import EntsoeClient  # noqa: E402
-from iberian.ingestion.omie import OmieClient, parse_marginalpdbc  # noqa: E402
-from iberian.ingestion.omie import to_records as omie_to_records  # noqa: E402
-from iberian.ingestion.open_meteo import OpenMeteoClient  # noqa: E402
-from iberian.ingestion.open_meteo import to_records as weather_to_records  # noqa: E402
+from iberian.ingestion.esios import INDICATORS, EsiosClient  # noqa: E402
+from iberian.ingestion.omie import OmieClient  # noqa: E402
+from iberian.ingestion.open_meteo import LOCATIONS, OpenMeteoClient  # noqa: E402
 from iberian.market_time import market_day_range  # noqa: E402
-from iberian.parsing.entsoe_prices import (  # noqa: E402
-    parse_prices_response,
-    to_records,
-)
-from iberian.pipeline.gold import gold_tables  # noqa: E402
 
 START = date.fromisoformat(START_DAY)
 DAY_LIST = [START + timedelta(days=offset) for offset in range(DAYS)]
-WANTED = set(DAY_LIST)
 WINDOW_START, WINDOW_END = market_day_range(START, DAYS)
 
 print(f"Market days {DAY_LIST[0]} to {DAY_LIST[-1]}")
@@ -186,164 +202,99 @@ print(f"UTC window  {WINDOW_START:%Y-%m-%d %H:%M}Z to {WINDOW_END:%Y-%m-%d %H:%M
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Helpers
+# MAGIC ## Landing
 # MAGIC
-# MAGIC Two details that otherwise bite when moving pandas into Delta.
+# MAGIC One helper, and it does one thing. The layout under the Volume is the
+# MAGIC same as the local `data/raw/`, which is what allows a local backfill to
+# MAGIC be copied up and read by the pipeline without translation.
 # MAGIC
-# MAGIC A column that is entirely null arrives as `object` dtype and Spark
-# MAGIC cannot infer a type for it, so the conversion fails on exactly the days
-# MAGIC where a source published nothing. Those columns are cast to string.
-# MAGIC
-# MAGIC Writes use `replaceWhere` on `market_day` rather than a plain append, so
-# MAGIC re-running a range replaces those days instead of duplicating them. That
-# MAGIC is what makes a backfill safe to repeat.
+# MAGIC Landing the same window twice is safe. The pipeline resolves overlapping
+# MAGIC documents by publication time, treating the later one as a correction,
+# MAGIC which is how the transparency platform itself treats a republication.
 
 # COMMAND ----------
 
-def to_spark(frame: pd.DataFrame):
-    """Convert a pandas frame to Spark, coercing columns Spark cannot infer."""
-    if frame.empty:
-        return None
-
-    out = frame.copy()
-    for column in out.columns:
-        if out[column].dtype == "object" and out[column].isna().all():
-            out[column] = out[column].astype("string")
-        elif out[column].dtype == "object":
-            sample = out[column].dropna().iloc[0]
-            if not isinstance(sample, (str, bool, date)):
-                out[column] = out[column].astype(str)
-    return spark.createDataFrame(out)
+landed: list[str] = []
 
 
-def write_table(frame: pd.DataFrame, name: str, comment: str) -> int:
-    """Write one table, replacing only the market days in this run."""
-    sdf = to_spark(frame)
-    if sdf is None:
-        print(f"  {name:<32} empty, skipped")
-        return 0
-
-    full_name = f"{CATALOG}.{SCHEMA}.{name}"
-    days = (
-        sorted({str(value) for value in frame["market_day"].dropna().unique()})
-        if "market_day" in frame.columns
-        else []
-    )
-    incremental = days and spark.catalog.tableExists(full_name)
-
-    writer = sdf.write.format("delta").mode("overwrite")
-    if incremental:
-        # replaceWhere and overwriteSchema cannot be combined, so an existing
-        # table is replaced day by day and keeps the schema it already has.
-        predicate = " OR ".join(f"market_day = '{day}'" for day in days)
-        writer = writer.option("replaceWhere", predicate)
-    else:
-        writer = writer.option("overwriteSchema", "true")
-
-    writer.saveAsTable(full_name)
-    escaped = comment.replace("'", "''")
-    spark.sql(f"COMMENT ON TABLE {full_name} IS '{escaped}'")
-    print(f"  {name:<32} {len(frame):>7} rows")
-    return len(frame)
-
-
-def land_bronze(subpath: str, filename: str, payload: bytes) -> str:
+def land(subpath: str, filename: str, payload: bytes) -> str:
     """Write a raw payload into the Volume, unmodified."""
     target = f"{VOLUME_ROOT}/{subpath}"
     dbutils.fs.mkdirs(target)
     path = f"{target}/{filename}"
     with open(path, "wb") as handle:
         handle.write(payload)
+    landed.append(path)
+    print(f"  {len(payload):>9,} bytes  {subpath}/{filename}")
     return path
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Bronze and silver: ENTSO-E
+# MAGIC ## ENTSO-E: prices, schedules and capacity
 # MAGIC
 # MAGIC Prices for both bidding zones, plus the scheduled commercial exchanges
 # MAGIC and day-ahead transfer capacity that make the saturation test possible.
-# MAGIC
-# MAGIC Raw payloads land first and parsing happens afterwards, so a parser fix
-# MAGIC is a reprocess of what is already stored rather than another call
-# MAGIC against a rate limited API.
+# MAGIC Both directions of the border are fetched, because a net flow is one
+# MAGIC side minus the other and the platform publishes one direction per
+# MAGIC request.
 
 # COMMAND ----------
 
-client = EntsoeClient(ENTSOE_TOKEN)
+settings = Settings.from_env()
+client = EntsoeClient(settings.require_entsoe_token())
 
-price_records = []
+print("ENTSO-E day-ahead prices")
 for label, eic in (("PT", EIC_PORTUGAL), ("ES", EIC_SPAIN)):
     response = client.day_ahead_prices(eic, WINDOW_START, WINDOW_END)
-    land_bronze(
+    land(
         f"entsoe/day_ahead_prices/zone={label}",
         f"{START:%Y-%m-%d}_{DAYS}d{response.suggested_extension}",
         response.content,
     )
-    rows = [
-        row
-        for row in to_records(parse_prices_response(response, eic))
-        if row["market_day"] in WANTED
-    ]
-    price_records.extend(rows)
-    print(f"  entsoe prices {label}: {len(rows)} rows")
-
-prices = pd.DataFrame(price_records)
-if prices.empty:
-    raise RuntimeError("No prices returned. Check the token and the date range.")
 
 # COMMAND ----------
 
-import tempfile  # noqa: E402
-from pathlib import Path  # noqa: E402
+print("ENTSO-E cross-border series")
 
-# fetch_border lands the raw payloads itself, so give it a scratch path and
-# copy the bytes into the Volume afterwards rather than duplicating its logic.
+# fetch_border lands the raw payloads itself under the layout the pipeline
+# expects, so give it a scratch directory and copy the bytes into the Volume
+# rather than duplicating its knowledge of that layout here.
 with tempfile.TemporaryDirectory() as scratch:
-    schedules, capacity = fetch_border(
-        client, WINDOW_START, WINDOW_END, Path(scratch), START, verbose=True
-    )
-    for path in Path(scratch).rglob("*"):
+    fetch_border(client, WINDOW_START, WINDOW_END, Path(scratch), START, verbose=False)
+    for path in sorted(Path(scratch).rglob("*")):
         if path.is_file():
-            relative = path.relative_to(scratch).parent.as_posix()
-            land_bronze(relative, path.name, path.read_bytes())
-
-print(f"  schedules: {len(schedules)} rows")
-print(f"  capacity:  {len(capacity)} rows")
+            land(path.relative_to(scratch).parent.as_posix(), path.name, path.read_bytes())
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Bronze and silver: OMIE
+# MAGIC ## OMIE
 # MAGIC
 # MAGIC The Iberian market operator publishes the same day-ahead prices as flat
-# MAGIC files. A second independent publication of one number is what makes the
-# MAGIC quality check downstream meaningful.
+# MAGIC files. A second independent publication of one number is what makes a
+# MAGIC quality check meaningful rather than self referential.
 
 # COMMAND ----------
 
+print("OMIE day-ahead files")
 omie_client = OmieClient()
-omie_rows = []
 
 for day in DAY_LIST:
     try:
         response = omie_client.day_ahead_prices(day)
     except RuntimeError as exc:
-        print(f"  omie {day}: failed, {exc}")
+        print(f"  {day}: failed, {exc}")
         continue
     if response.looks_empty:
-        print(f"  omie {day}: empty")
+        print(f"  {day}: empty")
         continue
-
-    land_bronze(f"omie/file_set={response.file_set}", response.filename, response.content)
-    omie_rows.extend(omie_to_records(parse_marginalpdbc(response.text)))
-
-print(f"  omie prices: {len(omie_rows)} rows")
+    land(f"omie/file_set={response.file_set}", response.filename, response.content)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Bronze and silver: Open-Meteo
+# MAGIC ## Open-Meteo
 # MAGIC
 # MAGIC Weather is the upstream driver. Market data shows that the border was
 # MAGIC full and that Portugal paid a premium; it cannot show why Spanish power
@@ -355,180 +306,83 @@ print(f"  omie prices: {len(omie_rows)} rows")
 
 # COMMAND ----------
 
-import json  # noqa: E402
-
+print("Open-Meteo hourly weather")
 weather_client = OpenMeteoClient()
-weather_rows = []
 
-for location in ("ES_andalusia", "ES_galicia", "PT_lisbon", "PT_alentejo"):
+for location in LOCATIONS:
     try:
-        points, payload = weather_client.hourly(location, DAY_LIST[0], DAY_LIST[-1])
+        _, payload = weather_client.hourly(location, DAY_LIST[0], DAY_LIST[-1])
     except RuntimeError as exc:
-        print(f"  weather {location}: failed, {exc}")
+        print(f"  {location}: failed, {exc}")
         continue
-    land_bronze(
+    land(
         f"open_meteo/location={location}",
         f"{START:%Y-%m-%d}_{DAYS}d.json",
         json.dumps(payload).encode("utf-8"),
     )
-    weather_rows.extend(weather_to_records(points))
-
-print(f"  open-meteo: {len(weather_rows)} rows")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Write silver
-
-# COMMAND ----------
-
-print("SILVER")
-write_table(prices, "silver_entsoe_prices",
-            "Day-ahead prices per bidding zone, parsed from ENTSO-E A44")
-write_table(schedules, "silver_entsoe_schedules",
-            "Scheduled commercial exchanges across the PT/ES border, ENTSO-E A09")
-write_table(capacity, "silver_entsoe_capacity",
-            "Day-ahead transfer capacity across the PT/ES border, ENTSO-E A61")
-write_table(pd.DataFrame(omie_rows), "silver_omie_prices",
-            "Day-ahead prices published independently by OMIE, for cross validation")
-write_table(pd.DataFrame(weather_rows), "silver_weather",
-            "Hourly weather at points chosen for their effect on Iberian prices")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Data quality: do two independent publishers agree?
+# MAGIC ## REE / ESIOS
 # MAGIC
-# MAGIC ENTSO-E and OMIE publish the same settled prices through entirely
-# MAGIC separate channels. Agreement is evidence that the parsing and the market
-# MAGIC day arithmetic are both correct, since the Iberian market day runs from
-# MAGIC local midnight in CET rather than from UTC midnight and a mistake there
-# MAGIC would misalign every timestamp. Disagreement is a finding to report, not
-# MAGIC a failure to hide, so this measures rather than asserts.
+# MAGIC Congestion rent on the Portuguese border, which is the independent check
+# MAGIC on this project's cost figure, plus the demand forecast and the demand
+# MAGIC that actually happened.
+# MAGIC
+# MAGIC REE's terms are specific: the token is personal, and anything published
+# MAGIC has to be served from your own infrastructure rather than by calling
+# MAGIC theirs. Landing the payloads here is what makes that possible.
 
 # COMMAND ----------
 
-if omie_rows:
-    entsoe_pt = prices[prices["zone_eic"] == EIC_PORTUGAL][["ts_utc", "price_eur_mwh"]]
-    omie_frame = pd.DataFrame(omie_rows)[["ts_utc", "price_first_eur_mwh"]]
-    check = entsoe_pt.merge(omie_frame, on="ts_utc", how="inner")
-    check["difference"] = (
-        check["price_eur_mwh"] - check["price_first_eur_mwh"]
-    ).abs()
+print("ESIOS indicators")
+esios_client = EsiosClient(os.environ["ESIOS_TOKEN"])
 
-    matched = len(check)
-    disagreements = int((check["difference"] > 0.01).sum())
-    agreement = 1 - disagreements / matched if matched else 0.0
-
-    print(f"  Intervals matched:  {matched}")
-    print(f"  Agreement within 0.01 EUR/MWh: {agreement:.1%}")
-    print(f"  Largest difference: {check['difference'].max():.4f} EUR/MWh")
-
-    write_table(
-        check.assign(market_day=check["ts_utc"].dt.date),
-        "silver_price_source_agreement",
-        "Interval level comparison of ENTSO-E against OMIE day-ahead prices",
+for name, indicator_id in INDICATORS.items():
+    try:
+        response = esios_client.indicator(indicator_id, WINDOW_START, WINDOW_END)
+    except RuntimeError as exc:
+        print(f"  {name} ({indicator_id}): failed, {exc}")
+        continue
+    land(
+        f"esios/indicator={indicator_id}",
+        f"{START:%Y-%m-%d}_{DAYS}d.json",
+        response.content,
     )
-else:
-    print("  OMIE returned nothing for this range, skipping the comparison.")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Gold
-# MAGIC
-# MAGIC Three tables, each serving a named user.
-# MAGIC
-# MAGIC 1. **A manufacturer scheduling energy intensive equipment** needs to know
-# MAGIC    whether one hour is reliably worse than another, which is
-# MAGIC    `gold_daily_profile`. One episode tells them nothing; a pattern they
-# MAGIC    can plan around every week does.
-# MAGIC 2. **A journalist or regulator** needs a defensible figure with a cause
-# MAGIC    and a cost, which is `gold_split_episodes`. The cost is the premium
-# MAGIC    applied to the energy actually imported during the episode, not to
-# MAGIC    national demand, which would overstate it by orders of magnitude.
-# MAGIC 3. **A grid analyst** needs utilisation interval by interval, which is
-# MAGIC    `gold_interval_premium`.
+# MAGIC ## What landed
 
 # COMMAND ----------
 
-flagged = flag_decoupling(build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN))
-step = infer_step(flagged)
-border = build_border_series(schedules, capacity, (EIC_SPAIN, EIC_PORTUGAL))
+print(f"{len(landed)} file(s) landed under {VOLUME_ROOT}\n")
 
-tables = gold_tables(flagged, border, pd.DataFrame(weather_rows))
-
-comments = {
-    "gold_interval_premium":
-        "One row per settlement interval: prices, premium, border utilisation",
-    "gold_daily_profile":
-        "Probability and size of a price split by hour of day",
-    "gold_split_episodes":
-        "Contiguous market splitting episodes with duration, cause and cost",
-    "gold_weather_context":
-        "Interval premiums joined to hourly weather at price relevant locations",
-}
-
-print("GOLD")
-for name, frame in tables.items():
-    write_table(frame, name, comments.get(name, name))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Verify
-
-# COMMAND ----------
-
-print(f"Settlement interval: {int((step / pd.Timedelta(hours=1)) * 60)} minutes\n")
-
-for row in spark.sql(f"SHOW TABLES IN {CATALOG}.{SCHEMA}").collect():
-    name = row["tableName"]
-    count = spark.table(f"{CATALOG}.{SCHEMA}.{name}").count()
-    print(f"  {name:<34} {count:>7} rows")
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC -- The episodes a journalist would ask about: longest first, with the
-# MAGIC -- cost of the energy actually imported while the zones priced apart.
-# MAGIC SELECT
-# MAGIC   start_utc,
-# MAGIC   duration_hours,
-# MAGIC   ROUND(peak_spread, 2)     AS peak_premium_eur_mwh,
-# MAGIC   premium_side,
-# MAGIC   max_severity,
-# MAGIC   ROUND(share_saturated, 2) AS share_border_full,
-# MAGIC   ROUND(extra_cost_eur, 0)  AS extra_cost_eur
-# MAGIC FROM gold_split_episodes
-# MAGIC ORDER BY duration_hours DESC, peak_premium_eur_mwh DESC
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC -- The interesting residual: splits the saturation story does not account
-# MAGIC -- for. Every row here is a case the current explanation misses, and the
-# MAGIC -- pattern in them is where the next result lives.
-# MAGIC SELECT
-# MAGIC   ts_utc,
-# MAGIC   ROUND(premium_eur_mwh, 2) AS premium_eur_mwh,
-# MAGIC   ROUND(utilisation, 3)     AS utilisation,
-# MAGIC   ROUND(capacity_mw, 0)     AS capacity_mw
-# MAGIC FROM gold_interval_premium
-# MAGIC WHERE is_decoupled AND NOT COALESCE(is_saturated, false)
-# MAGIC ORDER BY ABS(premium_eur_mwh) DESC
+for folder in ("entsoe/day_ahead_prices", "entsoe/crossborder", "omie",
+               "open_meteo", "esios"):
+    try:
+        entries = dbutils.fs.ls(f"{VOLUME_ROOT}/{folder}")
+        print(f"  {folder:<28} {len(entries)} entries")
+    except Exception:
+        print(f"  {folder:<28} not present")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Next
 # MAGIC
-# MAGIC - Run a longer range. Seven days is not enough for the daily profile to
-# MAGIC   mean anything; thirty is a minimum and sixty is better. `replaceWhere`
-# MAGIC   makes the backfill safe to repeat.
-# MAGIC - Schedule this as a job, or lift the same calls into a Lakeflow
-# MAGIC   declarative pipeline. The functions do not change either way.
-# MAGIC - The weather correlation in `gold_weather_context` is confounded by
-# MAGIC   time of day: solar radiation is mostly a function of the clock, so a
-# MAGIC   raw correlation against price measures the daily cycle rather than the
-# MAGIC   effect of sunshine. Control for hour of day before quoting it.
+# MAGIC Run the `Iberian_01` pipeline. Auto Loader picks up only the files it has
+# MAGIC not seen, parses them into silver and rebuilds gold.
+# MAGIC
+# MAGIC As a scheduled Job this notebook is task one and the pipeline is task
+# MAGIC two, depending on it. Day-ahead results are published in the early
+# MAGIC afternoon local time, so a run after that picks up the following market
+# MAGIC day.
+# MAGIC
+# MAGIC Two sources are landed here but not yet read by the pipeline: OMIE and
+# MAGIC Open-Meteo. Their bronze and silver tables, and the weather context gold
+# MAGIC table, still need adding to `pipelines/transformations/`. Until then the
+# MAGIC cross source price check and the weather analysis run locally only, and
+# MAGIC saying so is better than leaving someone to discover it.
