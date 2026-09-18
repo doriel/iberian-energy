@@ -48,6 +48,7 @@ because episodes never cross the market day boundary.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 # The module was renamed: `dlt` became `pyspark.pipelines`. The old name still
 # works, so falling back keeps this file runnable on a workspace that has not
@@ -62,9 +63,15 @@ import pandas as pd
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-# The Git folder root, so the pipeline imports the same package the tests cover
-# instead of a copy pasted into a notebook cell.
-sys.path.append("/Workspace/Repos/iberian-energy/src")
+# The repo root, so the pipeline imports the same package the tests cover
+# instead of a copy pasted into a notebook cell. Derived from this file's own
+# location rather than written out, because the absolute path depends on who
+# cloned the Git folder and where, and a hardcoded one is wrong for everybody
+# except the person who typed it.
+try:
+    sys.path.append(str(Path(__file__).resolve().parents[2] / "src"))
+except NameError:  # __file__ is not defined in every execution context
+    sys.path.append(spark.conf.get("iberian.src_path"))  # noqa: F821
 
 from iberian.analysis.interconnection import build_border_series  # noqa: E402
 from iberian.analysis.market_splitting import (  # noqa: E402
