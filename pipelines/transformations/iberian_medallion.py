@@ -130,7 +130,9 @@ QUANTITY_SCHEMA = T.StructType(
         T.StructField("market_day", T.DateType()),
         T.StructField("quantity_mw", T.DoubleType()),
         T.StructField("resolution", T.StringType()),
-        T.StructField("label", T.StringType()),
+        # `quantities_to_records` calls this `series_kind`, and declaring it
+        # as "label" quietly produced a column of nulls.
+        T.StructField("series_kind", T.StringType()),
         T.StructField("in_domain", T.StringType()),
         T.StructField("out_domain", T.StringType()),
         T.StructField("landed_at", T.TimestampType()),
@@ -138,12 +140,17 @@ QUANTITY_SCHEMA = T.StructType(
 )
 
 
-def _landing(folder: str):
-    """Auto Loader over one raw folder, keeping the payload byte for byte."""
+def _landing(folder: str, name: str):
+    """Auto Loader over one raw folder, keeping the payload byte for byte.
+
+    `name` is only the checkpoint's own directory. Deriving it from the folder
+    would put an `=` from a partition path into the schema location, which is
+    legal and unreadable.
+    """
     return (
         spark.readStream.format("cloudFiles")  # noqa: F821
         .option("cloudFiles.format", "binaryFile")
-        .option("cloudFiles.schemaLocation", f"{RAW}/_schemas/{folder}")
+        .option("cloudFiles.schemaLocation", f"{RAW}/_schemas/{name}")
         .load(f"{RAW}/{folder}")
         .select(
             F.col("path"),
@@ -165,7 +172,7 @@ def bronze_entsoe_prices():
     # The zone is in the path, not in a column, because the request was made
     # per zone. Losing it here would make the document unparseable later: an
     # A44 payload does not always name the bidding zone in a form we can trust.
-    return _landing("entsoe/day_ahead_prices").withColumn(
+    return _landing("entsoe/day_ahead_prices", "prices").withColumn(
         "zone_label", F.regexp_extract("path", r"zone=([^/]+)", 1)
     )
 
@@ -176,7 +183,11 @@ def bronze_entsoe_prices():
     table_properties={"quality": "bronze"},
 )
 def bronze_entsoe_schedules():
-    return _landing("entsoe/scheduled_exchanges")
+    # Both directions live under this prefix, as `dir=ES_to_PT` and
+    # `dir=PT_to_ES`, and both are needed: a net flow is one side minus the
+    # other. The direction is read from the document rather than the path,
+    # because the document is what a reader could check.
+    return _landing("entsoe/crossborder/kind=A09", "schedules")
 
 
 @dp.table(
@@ -185,7 +196,7 @@ def bronze_entsoe_schedules():
     table_properties={"quality": "bronze"},
 )
 def bronze_entsoe_capacity():
-    return _landing("entsoe/day_ahead_capacity")
+    return _landing("entsoe/crossborder/kind=A61", "capacity")
 
 
 # --- silver: parsed, one row per settlement interval ------------------------
@@ -266,7 +277,7 @@ def silver_entsoe_schedules():
 @dp.expect("capacity_is_not_negative", "quantity_mw >= 0")
 def silver_entsoe_capacity():
     return dp.read_stream("bronze_entsoe_capacity").mapInPandas(
-        _parse_quantities("day_ahead_capacity"), schema=QUANTITY_SCHEMA
+        _parse_quantities("forecasted_capacity"), schema=QUANTITY_SCHEMA
     )
 
 

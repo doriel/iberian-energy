@@ -1,224 +1,139 @@
-"""The weather correlation, and the confound it has to survive.
+"""Republished documents, and which version wins.
 
-The first run of this analysis reported a correlation around -0.75 between
-solar radiation and the Spanish price, and reported almost exactly the same
-figure for Lisbon and the Alentejo, where the mechanism cannot apply. That is
-the signature of a time of day confound rather than a finding, and these tests
-pin down the difference between the two so it cannot come back quietly.
+This only appears when reading a landing zone rather than a request: overlapping
+backfills leave the same market day in two files. The rule being tested is that
+the later publication supersedes the earlier one, which is how the transparency
+platform itself treats a correction.
 """
 
 from __future__ import annotations
 
-import math
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from iberian.analysis.weather import (  # noqa: E402
-    compare_locations,
-    local_hours,
-    weather_columns,
-    within_hour_correlation,
+from iberian.analysis.market_splitting import build_spread_series  # noqa: E402
+from iberian.pipeline.dedupe import (  # noqa: E402
+    PRICE_KEYS,
+    QUANTITY_KEYS,
+    conflicts,
+    latest_per_key,
 )
 
-START = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+PT = "10YPT-REN------W"
+ES = "10YES-REE------0"
+T0 = pd.Timestamp("2026-08-18T10:00Z")
 
 
-def solar(hour: int) -> float:
-    """A clean daily radiation curve, zero at night, peaking near midday."""
-    if hour < 6 or hour > 18:
-        return 0.0
-    return 800.0 * math.sin(math.pi * (hour - 6) / 12)
-
-
-def build_frame(
-    days: int,
-    cloud: list[float],
-    price_of: callable,
-    column: str = "shortwave_radiation_wm2__ES_andalusia",
-) -> pd.DataFrame:
-    rows = []
-    for day in range(days):
-        for hour in range(24):
-            ts = START + timedelta(days=day, hours=hour)
-            radiation = solar(hour) * cloud[day]
-            rows.append(
-                {
-                    "ts_utc": ts,
-                    column: radiation,
-                    "price_es_eur_mwh": price_of(day, hour, radiation),
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-def test_time_of_day_alone_produces_a_strong_but_meaningless_correlation():
-    """Radiation and price both follow the clock, and nothing else.
-
-    Day to day, cloud cover and price move independently. A correlation that
-    survives here would be measuring the solar cycle, which is exactly the
-    number that must not be quoted.
-    """
-    rng = np.random.default_rng(20260915)
-    days = 40
-    cloud = list(rng.uniform(0.55, 1.0, days))
-    noise = rng.normal(0.0, 12.0, days)
-
-    frame = build_frame(
-        days,
-        cloud,
-        lambda day, hour, radiation: 100.0 - 0.06 * solar(hour) + noise[day],
-    )
-
-    result = within_hour_correlation(
-        frame, "shortwave_radiation_wm2__ES_andalusia"
-    )
-
-    assert result.naive < -0.5, "the raw correlation should look impressive"
-    assert abs(result.within) < 0.15, "and should vanish once the hour is fixed"
-    assert result.confounded_by_hour is True
-
-
-def test_a_real_within_hour_effect_survives_the_control():
-    """Cloudier days are dearer at the same hour, so the control keeps it."""
-    rng = np.random.default_rng(7)
-    days = 40
-    cloud = list(rng.uniform(0.4, 1.0, days))
-
-    frame = build_frame(
-        days,
-        cloud,
-        lambda day, hour, radiation: 200.0 - 0.1 * radiation,
-    )
-
-    result = within_hour_correlation(
-        frame, "shortwave_radiation_wm2__ES_andalusia"
-    )
-
-    assert result.within < -0.9
-    assert result.confounded_by_hour is False
-
-
-def test_night_hours_are_excluded_rather_than_diluting_the_estimate():
-    """Radiation is identically zero at night, so there is nothing to correlate.
-
-    Keeping those rows would add pairs with no weather variation and pull the
-    pooled figure toward zero for a reason that has nothing to do with energy.
-    """
-    rng = np.random.default_rng(1)
-    days = 20
-    cloud = list(rng.uniform(0.5, 1.0, days))
-
-    frame = build_frame(
-        days,
-        cloud,
-        lambda day, hour, radiation: 200.0 - 0.1 * radiation,
-    )
-
-    result = within_hour_correlation(
-        frame, "shortwave_radiation_wm2__ES_andalusia"
-    )
-    by_hour = result.by_hour.set_index("local_hour")
-
-    # Madrid is UTC+2 in July, so 00:00Z is 02:00 local and deep in the night.
-    # The hour is still reported, with no correlation attached to it, rather
-    # than dropped, so the reader can see what was excluded and why.
-    assert pd.isna(by_hour.loc[2, "correlation"])
-    assert by_hour.loc[2, "observations"] == days
-
-    # The curve is strictly positive from 07:00Z to 17:00Z, which is 11 hours.
-    assert result.hours_used == 11
-    assert result.hours_used < len(by_hour)
-
-
-def test_hours_are_local_not_utc():
-    """The solar cycle follows local time, and so must the fixed effect."""
-    stamps = pd.Series(
+def prices(*rows) -> pd.DataFrame:
+    return pd.DataFrame(
         [
-            pd.Timestamp("2026-07-15T22:00Z"),  # summer, UTC+2
-            pd.Timestamp("2026-01-15T23:00Z"),  # winter, UTC+1
+            {
+                "zone_eic": zone,
+                "ts_utc": T0,
+                "price_eur_mwh": price,
+                "market": "day_ahead",
+                "resolution": "PT15M",
+                "landed_at": pd.Timestamp(landed),
+            }
+            for zone, price, landed in rows
         ]
     )
-    assert list(local_hours(stamps)) == [0, 0]
 
 
-def test_naive_number_is_as_strong_in_portugal_as_in_spain():
-    """The placebo that makes the confound undeniable.
+def test_the_later_publication_wins():
+    frame = prices(
+        (PT, 100.0, "2026-08-18T12:00Z"),
+        (PT, 110.0, "2026-08-20T12:00Z"),  # the correction
+    )
+    kept = latest_per_key(frame, PRICE_KEYS)
 
-    Portuguese cloud cover cannot move the Spanish price. If the naive figure
-    is just as strong there, the naive figure is not about the weather.
-    """
-    rng = np.random.default_rng(99)
-    days = 40
-    spain_cloud = list(rng.uniform(0.55, 1.0, days))
-    lisbon_cloud = list(rng.uniform(0.55, 1.0, days))
-    noise = rng.normal(0.0, 12.0, days)
-
-    rows = []
-    for day in range(days):
-        for hour in range(24):
-            rows.append(
-                {
-                    "ts_utc": START + timedelta(days=day, hours=hour),
-                    "shortwave_radiation_wm2__ES_andalusia": solar(hour)
-                    * spain_cloud[day],
-                    "shortwave_radiation_wm2__PT_lisbon": solar(hour)
-                    * lisbon_cloud[day],
-                    "price_es_eur_mwh": 100.0 - 0.06 * solar(hour) + noise[day],
-                }
-            )
-
-    table = compare_locations(pd.DataFrame(rows)).set_index("location")
-
-    assert set(table.index) == {"ES_andalusia", "PT_lisbon"}
-    assert abs(table.loc["ES_andalusia", "naive"] - table.loc["PT_lisbon", "naive"]) < 0.1
-    assert bool(table.loc["PT_lisbon", "confounded"]) is True
+    assert len(kept) == 1
+    assert kept.iloc[0]["price_eur_mwh"] == 110.0
 
 
-def test_weather_columns_finds_every_location():
-    frame = pd.DataFrame(
-        columns=[
-            "ts_utc",
-            "shortwave_radiation_wm2__ES_andalusia",
-            "shortwave_radiation_wm2__PT_lisbon",
-            "wind_speed_100m_kmh__ES_galicia",
-            "price_es_eur_mwh",
+def test_a_row_with_a_publication_time_beats_one_without():
+    frame = prices((PT, 100.0, "2026-08-18T12:00Z"))
+    frame = pd.concat([frame, prices((PT, 90.0, "2026-08-19T12:00Z"))])
+    frame.iloc[0, frame.columns.get_loc("landed_at")] = pd.NaT
+
+    kept = latest_per_key(frame, PRICE_KEYS)
+    assert kept.iloc[0]["price_eur_mwh"] == 90.0
+
+
+def test_the_two_zones_are_not_collapsed_into_one():
+    frame = prices((PT, 100.0, "2026-08-18T12:00Z"), (ES, 40.0, "2026-08-18T12:00Z"))
+    assert len(latest_per_key(frame, PRICE_KEYS)) == 2
+
+
+def test_intraday_is_not_collapsed_onto_day_ahead():
+    """Different markets on one timestamp are different facts, not duplicates."""
+    frame = prices((PT, 100.0, "2026-08-18T12:00Z"))
+    intraday = prices((PT, 105.0, "2026-08-18T18:00Z"))
+    intraday["market"] = "intraday"
+
+    assert len(latest_per_key(pd.concat([frame, intraday]), PRICE_KEYS)) == 2
+
+
+def test_deduplicating_lets_the_spread_be_computed_at_all():
+    """The failure this exists for: the pipeline reads every landed file."""
+    frame = pd.concat(
+        [
+            prices((PT, 100.0, "2026-08-18T12:00Z"), (ES, 40.0, "2026-08-18T12:00Z")),
+            prices((PT, 110.0, "2026-08-20T12:00Z"), (ES, 45.0, "2026-08-20T12:00Z")),
         ]
     )
-    assert weather_columns(frame, "shortwave_radiation_wm2") == [
-        "shortwave_radiation_wm2__ES_andalusia",
-        "shortwave_radiation_wm2__PT_lisbon",
-    ]
-    assert weather_columns(frame, "wind_speed_100m_kmh") == [
-        "wind_speed_100m_kmh__ES_galicia"
-    ]
+
+    try:
+        build_spread_series(frame, PT, ES)
+    except ValueError as error:
+        assert "duplicated" in str(error)
+    else:  # pragma: no cover - the guard is what makes the fix necessary
+        raise AssertionError("expected the duplicate guard to fire")
+
+    spread = build_spread_series(latest_per_key(frame, PRICE_KEYS), PT, ES)
+    assert len(spread) == 1
+    assert spread.iloc[0]["spread_eur_mwh"] == 65.0
 
 
-def test_too_little_data_reports_nothing_rather_than_a_number():
-    frame = pd.DataFrame(
-        {
-            "ts_utc": [START],
-            "shortwave_radiation_wm2__ES_andalusia": [500.0],
-            "price_es_eur_mwh": [40.0],
-        }
+def test_quantities_deduplicate_on_direction_as_well_as_time():
+    rows = pd.DataFrame(
+        [
+            {"ts_utc": T0, "quantity_mw": 3000.0, "in_domain": PT, "out_domain": ES,
+             "series_kind": "scheduled_exchange", "landed_at": pd.Timestamp("2026-08-18T12:00Z")},
+            {"ts_utc": T0, "quantity_mw": 3200.0, "in_domain": PT, "out_domain": ES,
+             "series_kind": "scheduled_exchange", "landed_at": pd.Timestamp("2026-08-20T12:00Z")},
+            {"ts_utc": T0, "quantity_mw": 500.0, "in_domain": ES, "out_domain": PT,
+             "series_kind": "scheduled_exchange", "landed_at": pd.Timestamp("2026-08-18T12:00Z")},
+        ]
     )
-    result = within_hour_correlation(
-        frame, "shortwave_radiation_wm2__ES_andalusia"
+    kept = latest_per_key(rows, QUANTITY_KEYS)
+
+    assert len(kept) == 2
+    pt_import = kept[kept["in_domain"] == PT].iloc[0]
+    assert pt_import["quantity_mw"] == 3200.0
+
+
+def test_a_republication_that_changed_the_number_is_reportable():
+    frame = prices(
+        (PT, 100.0, "2026-08-18T12:00Z"),
+        (PT, 110.0, "2026-08-20T12:00Z"),
     )
-
-    assert result.naive is None
-    assert result.within is None
-    assert result.confounded_by_hour is None
-    assert result.by_hour.empty
+    assert len(conflicts(frame, PRICE_KEYS, "price_eur_mwh")) == 1
 
 
-def test_missing_column_fails_loudly():
-    frame = pd.DataFrame({"ts_utc": [START], "price_es_eur_mwh": [40.0]})
-    with pytest.raises(KeyError, match="shortwave"):
-        within_hour_correlation(frame, "shortwave_radiation_wm2__ES_andalusia")
+def test_a_republication_that_changed_nothing_is_not_a_conflict():
+    frame = prices(
+        (PT, 100.0, "2026-08-18T12:00Z"),
+        (PT, 100.0, "2026-08-20T12:00Z"),
+    )
+    assert conflicts(frame, PRICE_KEYS, "price_eur_mwh").empty
+
+
+def test_an_empty_frame_survives_both_helpers():
+    empty = prices().iloc[0:0]
+    assert latest_per_key(empty, PRICE_KEYS).empty
+    assert conflicts(empty, PRICE_KEYS, "price_eur_mwh").empty

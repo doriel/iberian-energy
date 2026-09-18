@@ -22,7 +22,7 @@ from collections.abc import Sequence
 import pandas as pd
 
 PRICE_KEYS = ("zone_eic", "ts_utc", "market")
-QUANTITY_KEYS = ("ts_utc", "in_domain", "out_domain", "label")
+QUANTITY_KEYS = ("ts_utc", "in_domain", "out_domain", "series_kind")
 
 
 def conflicts(
