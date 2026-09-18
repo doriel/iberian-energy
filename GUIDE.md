@@ -1,27 +1,40 @@
-# How to test and play with this
+# How to run this
 
-Everything runs locally. Nothing here needs Databricks except the agent, and
-only the ENTSO-E and ESIOS calls need a credential.
+Two environments, and the same code in both. Locally the medallion is parquet
+on disk, on Databricks it is Delta in Unity Catalog built by a Lakeflow
+declarative pipeline. The ingestion, parsing and analysis functions are the
+same objects in both cases, which is what makes the numbers comparable.
 
-```bash
-cd ~/repos/iberian-energy
-source .venv/bin/activate
-export $(grep -v '^#' .env | xargs)
-```
+Start here for the local loop, which is where development happens, then
+[Databricks](#on-databricks) for the platform.
+
+- [The mental model](#the-mental-model)
+- [Locally](#locally)
+- [On Databricks](#on-databricks)
+- [The evaluation set](#the-evaluation-set)
+- [Running the agent](#running-the-agent)
+- [Things worth breaking on purpose](#things-worth-breaking-on-purpose)
+- [Changing the analysis](#changing-the-analysis)
 
 ## The mental model
 
 Five layers, and each one is worth poking at separately.
 
-**Raw** (`data/raw/`) holds API payloads byte for byte, exactly as they
-arrived. Nothing is interpreted here. If a parser turns out to be wrong, this
-is what you reprocess instead of re-hitting a rate limited API.
+**Raw** holds API payloads byte for byte, exactly as they arrived. Nothing is
+interpreted. If a parser turns out to be wrong, this is what gets reprocessed
+instead of re-hitting a rate limited API. Locally it is `data/raw/`, on
+Databricks a Unity Catalog Volume with the same directory layout, which is why
+a local backfill can be copied up and read without translation.
 
-**Silver** (`data/lakehouse/silver/`) is the raw payloads parsed into tidy
-rows, one table per source, no business logic applied.
+**Bronze** exists only on Databricks: a streaming table over the Volume, read as
+`binaryFile`, so the payload is stored exactly as it arrived and Auto Loader
+tracks which files it has already seen.
 
-**Gold** (`data/lakehouse/gold/`) is the three persona tables plus weather
-context. This is what an app or an agent reads.
+**Silver** is those payloads parsed into tidy rows, one table per source, no
+business logic applied.
+
+**Gold** is the three persona tables, plus weather context and the two
+validations.
 
 **The analysis modules** (`src/iberian/analysis/`) are pure functions on
 dataframes. No network, no credentials, no Databricks.
@@ -30,20 +43,51 @@ dataframes. No network, no credentials, no Databricks.
 phrase them, and rejects the answer if it contains a figure that was not
 retrieved. Only the model call touches a network.
 
-That is what makes the whole thing testable in under two seconds.
+---
 
-## Start here
+## Locally
 
 ```bash
-python -m pytest tests/ -q          # 134 tests, no network, ~1 second
-python scripts/run_market_splitting.py --demo   # whole pipeline, synthetic data
-python scripts/explore.py tables    # what the last pipeline run produced
+cd ~/repos/iberian-energy
+source .venv/bin/activate
+export $(grep -v '^#' .env | xargs)
 ```
 
-The demo plants two known splits in a synthetic week, so you can verify the
-detection by eye before trusting it on real data.
+### Start here
 
-## Exploring what the pipeline built
+```bash
+python -m pytest tests/ -q          # 166 tests, no network, under two seconds
+python scripts/run_market_splitting.py --demo   # whole pipeline, synthetic data
+python scripts/explore.py tables    # what the last run produced
+```
+
+The demo plants two known splits in a synthetic week, so the detection is
+verifiable by eye before trusting it on real data.
+
+### Building the medallion
+
+```bash
+# One market day, cheap
+python scripts/build_medallion.py --start 2026-09-03 --days 1
+
+# A month, for a daily profile that actually means something
+python scripts/build_medallion.py --start 2026-08-01 --days 31
+
+# Recompute gold from the silver already on disk, no API calls at all
+python scripts/build_medallion.py --from-silver
+
+# Skip a source to see the pipeline degrade gracefully
+python scripts/build_medallion.py --start 2026-09-03 --days 1 --skip-weather
+```
+
+`--from-silver` is the one to use after changing anything in `analysis/` or
+`pipeline/gold.py`. It runs the same `build_gold()` the full pipeline runs, so
+there is no second code path that can drift from the first.
+
+Seven days is not enough to tell a manufacturer when to run equipment. Thirty
+is a minimum, sixty is better. That run costs nothing but time.
+
+### Exploring what it built
 
 ```bash
 python scripts/explore.py profile              # persona 1: when does PT pay?
@@ -56,9 +100,9 @@ python scripts/explore.py compare              # ENTSO-E against OMIE
 
 `explore.py weather` reports two numbers per location: the raw correlation and
 the same correlation computed within each hour of the day. They disagree badly,
-and the second one is the one to believe. See "The weather result" below.
+and the second is the one to believe. See [the weather result](#the-weather-result-and-why-the-obvious-version-was-wrong).
 
-## Investigating one number
+### Investigating one number
 
 These take a real question and answer it with sourced figures.
 
@@ -78,36 +122,184 @@ python scripts/show_window.py --from 2026-09-03T16:30 --to 2026-09-03T19:00
 # Does a full border explain the splits, across a range?
 python scripts/analyse_saturation.py --start 2026-09-01 --days 7 --show-splits
 
-# This project's cost figure against REE's published congestion rent
+# The cost figure against REE's published congestion rent
 python scripts/check_congestion_rent.py --start 2026-07-01 --days 60
 ```
 
-## Rebuilding
+The last one is now also a gold table, `gold_cost_validation`. The script
+remains useful for a quick answer without a cluster.
 
-```bash
-# One market day, cheap
-python scripts/build_medallion.py --start 2026-09-03 --days 1
+### Poking at the tables directly
 
-# A month, for a daily profile that actually means something
-python scripts/build_medallion.py --start 2026-08-01 --days 31
+```python
+import pandas as pd
+pd.set_option("display.width", 200)
 
-# Recompute gold from the silver already on disk, no API calls at all
-python scripts/build_medallion.py --from-silver
+g = pd.read_parquet("data/lakehouse/gold/gold_interval_premium.parquet")
 
-# Skip a source to see the pipeline degrade gracefully
-python scripts/build_medallion.py --start 2026-09-03 --days 1 --skip-weather
+g[g.is_decoupled][["ts_utc", "premium_eur_mwh", "utilisation"]]
+g.groupby("market_day").is_decoupled.sum()
+g.groupby("hour_of_day_utc").premium_eur_mwh.mean().sort_values()
+
+# Splits that saturation does NOT explain, which are the interesting ones
+g[(g.is_decoupled) & (~g.is_saturated.fillna(False))]
 ```
 
-`--from-silver` is the one to use after changing anything in
-`analysis/` or `pipeline/gold.py`. It runs the same `build_gold()` the full
-pipeline runs, so there is no second code path that can drift from the first.
+That last query is the one to keep an eye on. Every row in it is a split the
+current story does not account for, and the pattern in them is where the next
+real result lives.
 
-Seven days is not enough to tell a manufacturer when to run equipment. Thirty
-is a minimum, sixty is better. That run costs nothing but time.
+---
+
+## On Databricks
+
+Two pieces, in this order: a notebook that fetches and lands, then a pipeline
+that transforms. The notebook writes no tables and the pipeline makes no HTTP
+requests, and neither of those is an accident.
+
+A declarative pipeline is given data and asked to derive tables from it. Putting
+a rate limited API call inside a unit of work the platform is entitled to retry
+would be a mistake. And a pipeline only manages tables it created, so a notebook
+writing the same names both breaks the pipeline and gives two implementations of
+one transformation.
+
+### One time setup
+
+**Secrets.** Both tokens live in a scope, never in a widget: a widget's value is
+saved with the notebook state and this repository is public.
+
+```bash
+databricks secrets create-scope iberian
+databricks secrets put-secret iberian entsoe_token
+databricks secrets put-secret iberian esios_token
+```
+
+**Git folder.** Clone the repository into the workspace. The notebook and the
+pipeline both import `src/iberian/` from it rather than carrying copies.
+
+**The pipeline.** In **Jobs & Pipelines**, create an ETL pipeline with:
+
+| Setting | Value |
+|---|---|
+| Source code | `pipelines/transformations` inside the Git folder |
+| Default catalog and schema | where the tables should land |
+| Configuration | `iberian.catalog`, `iberian.schema`, `iberian.raw_volume`, `iberian.src_path` |
+| Compute | serverless |
+
+`iberian.src_path` is the absolute path to `src/` in the Git folder. The file
+tries `__file__` first and falls back to this, because `__file__` is not defined
+in every execution context.
+
+Keep `spark.sql.ansi.enabled` at `true`. It is what turned a stray reference
+file in the landing zone into a visible error rather than a silent null.
+
+### Running it
+
+**1. Ingestion.** Open `pipelines/01_build_medallion.py`, set the widgets and
+**Run all**.
+
+```
+catalog       bootcamp_students
+schema        doriel
+volume        raw
+start_day     2026-07-16
+days          65
+secret_scope  iberian
+```
+
+It fetches ENTSO-E prices for both zones, the cross-border schedules and
+capacity in both directions, the OMIE files, Open-Meteo for four locations and
+four ESIOS indicators, and lands every payload in the Volume. Landing the same
+window twice is safe.
+
+**2. The pipeline.** **Dry run** first: it validates the code and the dependency
+graph in seconds without writing anything, which catches an import or a schema
+mistake before a cluster spends minutes on it. Then **Run pipeline**.
+
+Auto Loader reads only the files it has not seen, so a daily run costs seconds.
+Gold is recomputed in full, which at a few thousand rows also costs seconds.
+
+### The 18 tables
+
+| Layer | Tables |
+|---|---|
+| Bronze | `bronze_entsoe_prices`, `bronze_entsoe_schedules`, `bronze_entsoe_capacity`, `bronze_omie`, `bronze_open_meteo`, `bronze_esios` |
+| Silver | `silver_entsoe_prices`, `silver_entsoe_schedules`, `silver_entsoe_capacity`, `silver_omie_prices`, `silver_weather`, `silver_esios_indicators` |
+| Gold | `gold_interval_premium`, `gold_daily_profile`, `gold_split_episodes`, `gold_weather_context`, `gold_price_source_agreement`, `gold_cost_validation` |
+
+### Checking it agrees with the local build
+
+This is the check worth running after any change to the analysis, because it is
+the one that proves moving the code did not move the numbers.
+
+```sql
+SELECT market_day,
+       count(*) AS episodes,
+       round(sum(extra_cost_eur)) AS eur,
+       round(max(max_abs_spread), 2) AS worst_spread
+FROM bootcamp_students.doriel.gold_split_episodes
+GROUP BY 1 ORDER BY 1;
+```
+
+```bash
+python - <<'EOF'
+import pandas as pd
+e = pd.read_parquet("data/lakehouse/gold/gold_split_episodes.parquet")
+print(e.groupby("market_day")
+       .agg(episodes=("episode_id", "count"),
+            eur=("extra_cost_eur", lambda s: round(s.sum())),
+            worst_spread=("max_abs_spread", lambda s: round(s.max(), 2)))
+       .to_string())
+EOF
+```
+
+Compare only the days present on both sides. They should match exactly. A one
+euro difference on a day is rounding, not divergence: SQL rounds a half up and
+Python rounds it to even, so a sum ending in `.5` differs by one. Check the
+unrounded sum before chasing it.
+
+### The two validations, as queries
+
+```sql
+-- Do the two publishers agree, interval by interval?
+SELECT count(*) AS intervals,
+       sum(CASE WHEN agrees THEN 1 ELSE 0 END) AS agreeing,
+       round(max(pt_difference), 4) AS worst_pt_difference
+FROM bootcamp_students.doriel.gold_price_source_agreement;
+
+-- Does the cost figure match REE's published congestion rent?
+SELECT round(sum(our_cost_eur)) AS ours,
+       round(sum(congestion_rent_eur)) AS ree,
+       round(100 * (sum(our_cost_eur) - sum(congestion_rent_eur))
+                 / sum(congestion_rent_eur), 4) AS difference_pct
+FROM bootcamp_students.doriel.gold_cost_validation;
+
+-- The interesting rows: days REE recorded rent and this project found none
+SELECT * FROM bootcamp_students.doriel.gold_cost_validation
+WHERE episodes = 0 AND congestion_rent_eur > 0
+ORDER BY congestion_rent_eur DESC;
+```
+
+### When something fails
+
+**"MANAGED table already exists with that name."** A table of that name was
+created outside the pipeline, usually by an older version of the notebook. The
+pipeline only manages tables it created. Drop it and re-run: everything from
+bronze onwards is derived from the bytes in the Volume, so nothing is lost.
+
+**The gold tables fail with a timezone error.** Spark returns timestamps without
+a timezone and the market day is found by converting to CET. `as_utc` handles
+this at the boundary; if a new table skips it, this is the symptom.
+
+**A stream fails on a cast.** Something is in the landing zone that is not a
+response document. The ESIOS catalogue and the request metadata files are both
+filtered out by name for this reason.
+
+---
 
 ## The evaluation set
 
-The north star metric needs human labels. These cannot be generated, and in
+The north star metric needs human labels. They cannot be generated, and in
 particular they cannot be generated by the same system that produced the
 candidate cause, because then the metric measures the project agreeing with
 itself.
@@ -128,14 +320,19 @@ python scripts/label_episodes.py --all
 
 By default the episodes are interleaved across strata rather than ordered by
 spread, so a partially labelled sheet is still representative. `--by-spread`
-gives the largest first if you want that instead.
+gives the largest first.
 
 `evaluation/cause_vocabulary.md` holds the allowed causes and what each one
 means. When the evidence does not settle it, `unclear` is a real answer and a
-more useful one than a guess, because it is the class the agent must also be
-able to produce.
+more useful one than a guess, because it is a class the agent must also be able
+to produce.
+
+All 48 episodes are labelled.
 
 ## Running the agent
+
+The agent needs a Databricks serving endpoint, so this is the one local command
+that authenticates to the workspace.
 
 ```bash
 # Read the fact sheets without spending a token
@@ -148,36 +345,57 @@ python scripts/explain_episodes.py --limit 5
 python scripts/explain_episodes.py --labelled-only
 
 # A larger model, to test whether grounding or model size does the work
-python scripts/explain_episodes.py --endpoint databricks-claude-opus-4-5
+python scripts/explain_episodes.py --labelled-only \
+  --endpoint databricks-claude-opus-4-5 \
+  --out evaluation/explanations_opus.jsonl
 ```
 
 Output lands in `evaluation/explanations.jsonl`, one record per episode, with
-the rejected drafts kept. The rejections are the interesting rows: if the
-verifier never rejects anything, either the model is flawless or the check is
-weak, and you need to know which.
+the rejected drafts and the final failing draft kept. The rejections are the
+interesting rows: if the verifier never rejects anything, either the model is
+flawless or the check is weak, and that needs settling rather than assuming.
 
-Note that `--dry-run` still performs retrieval. Only the model call is skipped.
-A preview that showed different facts from the real run would be worse than no
-preview.
+`--dry-run` still performs retrieval. Only the model call is skipped. A preview
+that showed different facts from the real run would be worse than no preview.
+
+### Reading the failures
+
+```bash
+python - <<'EOF'
+import json, pathlib
+for name in ["explanations.jsonl", "explanations_opus.jsonl"]:
+    path = pathlib.Path("evaluation") / name
+    if not path.exists():
+        continue
+    for line in path.open():
+        record = json.loads(line)
+        if record["grounded"]:
+            continue
+        print("=" * 70, f"\n{name}  {record['episode_key']}  {record['unsupported']}\n")
+        print(record.get("final_draft") or record["rejected_drafts"][-1])
+EOF
+```
 
 ### If the SDK fails with `invalid_client`
 
 The Databricks SDK reads `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`
-from the environment and tries machine to machine auth with them, ignoring your
+from the environment and tries machine to machine auth with them, ignoring the
 CLI profile. The app's OAuth credentials are named `APP_OAUTH_CLIENT_ID` and
-`APP_OAUTH_CLIENT_SECRET` for exactly this reason. If you still hit it from an
-older `.env`:
+`APP_OAUTH_CLIENT_SECRET` for exactly this reason. If an older `.env` still
+exports the reserved names:
 
 ```bash
 env -u DATABRICKS_CLIENT_ID -u DATABRICKS_CLIENT_SECRET \
-  python scripts/explain_episodes.py --limit 5
+  python scripts/explain_episodes.py --labelled-only
 ```
+
+---
 
 ## Things worth breaking on purpose
 
-The guards in this codebase exist because each one protects a number that
-would otherwise be wrong in a way nobody notices. Watching them fire is the
-fastest way to understand what they are for.
+The guards in this codebase exist because each one protects a number that would
+otherwise be wrong in a way nobody notices. Watching them fire is the fastest
+way to understand what they are for.
 
 **Make the two zones disagree on resolution.**
 
@@ -196,62 +414,83 @@ rows = pd.DataFrame([
 build_spread_series(rows, EIC_PORTUGAL, EIC_SPAIN)   # raises
 ```
 
-Without that guard the pivot lines an hourly price up with the first quarter
-of the hour and silently drops the other three.
+Without that guard the pivot lines an hourly price up with the first quarter of
+the hour and silently drops the other three.
 
 **Feed it duplicate timestamps.** Duplicate the PT row above with a different
 price and it refuses rather than picking one. That is the intraday contamination
-we hit early on, where one A44 document carried day-ahead and three intraday
-auctions stacked on the same timestamps.
+hit early on, where one A44 document carried day-ahead and three intraday
+auctions stacked on the same timestamps. It is also what fired the first time
+the pipeline read the whole landing zone, which is what `pipeline/dedupe.py`
+now resolves.
 
-**Change the settlement interval.** In `detect_episodes`, pass
-`step=pd.Timedelta(hours=1)` against quarter hourly data and watch every
-duration inflate by four while separate episodes merge into one. That was a
-real bug, and the arithmetic is now inferred from the data instead.
-
-**Move the market day boundary.** Edit `MARKET_TIMEZONE` in `config.py` to
-`"UTC"` and re-run `cross_check_prices.py`. The OMIE and ENTSO-E timestamps
-stop lining up and the merge collapses, which is exactly how you would discover
-the boundary is local midnight in CET and not UTC midnight.
-
-**Turn off the point in time filter** with `--no-point-in-time` on
-`explain_interval.py`. Notices published after the interval start appearing in
-the explanation. That is the hindsight leak your evaluation numbers depend on
-not having.
-
-**Invent a number in an explanation.** Take a record from
-`evaluation/explanations.jsonl`, change one figure, and run it back through the
-verifier:
-
-```python
-import sys, json; sys.path.insert(0, "src")
-from iberian.agent.verify import verify
-```
-
-Then feed it a sheet from `episode_facts` and watch the altered figure come
-back in `verdict.unsupported`. The check allows thousands separators, a ratio
-written as a percentage, and rounding to the precision actually written. It
-allows nothing else, which is what stops it being theatre.
-
-## Poking at the tables directly
+**Give `to_market_day` a naive timestamp.**
 
 ```python
 import pandas as pd
-pd.set_option("display.width", 200)
-
-g = pd.read_parquet("data/lakehouse/gold/gold_interval_premium.parquet")
-
-g[g.is_decoupled][["ts_utc", "premium_eur_mwh", "utilisation"]]
-g.groupby("market_day").is_decoupled.sum()
-g.groupby("hour_of_day_utc").premium_eur_mwh.mean().sort_values()
-
-# Splits that saturation does NOT explain, which are the interesting ones
-g[(g.is_decoupled) & (~g.is_saturated.fillna(False))]
+from iberian.market_time import to_market_day
+to_market_day(pd.Timestamp("2026-08-18 23:30:00"))   # raises
 ```
 
-That last query is the one to keep an eye on. Every row in it is a split the
-current story does not account for, and finding the pattern in them is where
-the next real result lives.
+It has to. The market day begins at local midnight, so assuming a timezone here
+would move every boundary by an hour or two and nothing would complain.
+
+**Change the settlement interval.** In `detect_episodes`, pass
+`step=pd.Timedelta(hours=1)` against quarter hourly data and watch every
+duration inflate by four while separate episodes merge into one. That was a real
+bug, and the arithmetic is now inferred from the data instead.
+
+**Move the market day boundary.** Edit `MARKET_TIMEZONE` in `config.py` to
+`"UTC"` and re-run `cross_check_prices.py`. The OMIE and ENTSO-E timestamps stop
+lining up and the merge collapses, which is exactly how one would discover the
+boundary is local midnight in CET and not UTC midnight.
+
+**Turn off the point in time filter** with `--no-point-in-time` on
+`explain_interval.py`. Notices published after the interval start appearing in
+the explanation. That is the hindsight leak the evaluation numbers depend on not
+having.
+
+**Invent a number in an explanation.** Take a record from
+`evaluation/explanations.jsonl`, change one figure, and run it back through
+`agent.verify.verify` against the sheet from `episode_facts`. The altered figure
+comes back in `verdict.unsupported`. The check allows thousands separators, a
+ratio written as a percentage, and rounding to the precision actually written.
+It allows nothing else, which is what stops it being theatre.
+
+**Swap the OMIE columns.** `orient_omie_columns` decides which column is
+Portugal by fitting both assignments. Feed it a frame with the columns reversed
+and it returns the other pair. On a fully coupled day the two are identical and
+the question has no answer, which is why the orientation is only meaningful once
+there is a split in the window.
+
+## Changing the analysis
+
+**Severity bands** live in `config.py` as `SEVERITY_BANDS`. The current 5 and 20
+EUR/MWh cuts are round numbers, not calibrated. With a month of data, look at
+the distribution of `abs_premium_eur_mwh` and set them on percentiles instead.
+
+**Saturation threshold** is `SATURATION_THRESHOLD` in
+`analysis/interconnection.py`, currently 0.98. Raise it to 1.0 and see how many
+episodes stop being explained; the published capacity and the schedule are
+rounded independently, which is why it is not 1.0.
+
+**The split threshold** is 0.01 EUR/MWh, and [ROADMAP.md](ROADMAP.md) quantifies
+exactly what ignoring it costs against REE's published figures. Do not lower it
+without reading that section.
+
+**Weather locations** are in `ingestion/open_meteo.py`. They are chosen for what
+drives the price rather than where people live, and the reasoning is in the
+comment next to each one. Adding one changes the column set of
+`gold_weather_context`, whose schema is built from `LOCATIONS`, so the pipeline
+follows automatically.
+
+**The agent's rules** are `SYSTEM_PROMPT` in `agent/explain.py`, ordered by
+importance. Changing them changes what the model writes but not what it is
+allowed to write: that is `agent/verify.py`, and the prompt is not what makes
+the guarantee.
+
+After changing any of these, run the tests. If nothing fails, the change was not
+covered, and that is worth a new test rather than a shrug.
 
 ## The weather result, and why the obvious version was wrong
 
@@ -270,31 +509,3 @@ real money.
 The honest reading is a price floor effect rather than a linear relationship,
 and the Portuguese locations correlate closely enough with the Spanish ones that
 correlation alone cannot single out Andalusia as the driver.
-
-## Changing the analysis
-
-**Severity bands** live in `config.py` as `SEVERITY_BANDS`. The current 5 and
-20 EUR/MWh cuts are round numbers I picked, not calibrated. Once you have a
-month of data, look at the distribution of `abs_premium_eur_mwh` and set them
-on percentiles instead.
-
-**Saturation threshold** is `SATURATION_THRESHOLD` in
-`analysis/interconnection.py`, currently 0.98. Raise it to 1.0 and see how many
-episodes stop being explained; the published capacity and the schedule are
-rounded independently, which is why it is not 1.0.
-
-**The split threshold** is 0.01 EUR/MWh, and `ROADMAP.md` quantifies exactly
-what ignoring it costs against REE's published figures. Do not lower it without
-reading that section.
-
-**Weather locations** are in `ingestion/open_meteo.py`. They are chosen for
-what drives the price rather than where people live, and the reasoning is in
-the comment next to each one.
-
-**The agent's rules** are `SYSTEM_PROMPT` in `agent/explain.py`, ordered by
-importance. Changing them changes what the model writes but not what it is
-allowed to write: that is `agent/verify.py`, and the prompt is not what makes
-the guarantee.
-
-After changing any of these, run the tests. If nothing fails, the change was
-not covered, and that is worth a new test rather than a shrug.

@@ -9,16 +9,23 @@ Portugal usually pays the premium. This project detects those episodes, prices
 them, attributes them to named transmission assets, and produces an explanation
 in prose where every figure is traceable to a published document.
 
+- [GUIDE.md](GUIDE.md) is how to run it, locally and on Databricks.
+- [ROADMAP.md](ROADMAP.md) is what is built, what is not, and what the numbers
+  have been checked against.
+
 ## Why the code is shaped this way
 
 The ingestion, parsing, analysis and agent modules are plain Python with no
-Databricks imports. That is deliberate. It means you can iterate on logic in
-VS Code in seconds instead of waiting on a cluster, the logic is unit testable,
-and the same functions get called from a Lakeflow pipeline without modification.
+Databricks imports. That is deliberate. It means the logic can be iterated on in
+VS Code in seconds instead of on a cluster, it is unit testable, and the same
+functions are called by the Lakeflow declarative pipeline without modification.
+The pipeline file contains no transformation of its own: it wires tables to
+functions the test suite already covers.
 
 Bronze stores the raw API payload exactly as returned. Parsing happens on the
-bronze to silver hop, so a parsing bug is fixable by replaying what you already
-landed rather than re-hitting a rate limited API.
+bronze to silver hop, so a parsing bug is fixed by replaying what has already
+landed rather than by re-hitting a rate limited API. Sixty market days were
+rebuilt from stored bytes without a single call to ENTSO-E.
 
 The agent never sees market data. It is handed a fact sheet assembled in Python,
 where every value carries the document it came from, and what it writes is
@@ -32,21 +39,27 @@ src/iberian/
   config.py                      EIC codes, document types, thresholds, settings
   market_time.py                 the Iberian market day, local midnight in CET
   ingestion/entsoe.py            API client, returns raw XML for bronze
+  ingestion/border.py            A09 schedules and A61 capacity, both directions
   ingestion/omie.py              delimited day-ahead files, independent channel
-  ingestion/esios.py             REE indicators, congestion rent and demand
+  ingestion/esios.py             REE indicators: congestion rent, demand
   ingestion/open_meteo.py        hourly weather at four price relevant locations
   parsing/entsoe_prices.py       A44 XML -> tidy rows (handles sparse Points)
   parsing/entsoe_outages.py      A78/A80 curves, with point in time filtering
   analysis/market_splitting.py   decoupling detection + episode grouping
   analysis/interconnection.py    utilisation and saturation
   analysis/weather.py            within hour of day correlation
-  pipeline/                      bronze, silver and gold builders
+  analysis/validation.py         the two checks against outside publishers
+  pipeline/gold.py               the three persona tables plus weather context
+  pipeline/dedupe.py             which publication wins when a document repeats
   agent/facts.py                 retrieved evidence as named, sourced facts
   agent/verify.py                rejects any figure that was not retrieved
   agent/explain.py               generation loop with one corrected retry
+pipelines/
+  01_build_medallion.py          Databricks ingestion notebook, lands raw only
+  transformations/               the Lakeflow declarative pipeline, 18 tables
 scripts/
-  build_medallion.py             end to end run over a range of market days
-  explore.py                     read the tables without writing code
+  build_medallion.py             local end to end run over a range of market days
+  explore.py                     read the local tables without writing code
   explain_interval.py            the evidence behind one moment
   build_evaluation_set.py        the labelling sheet
   label_episodes.py              label episodes in the terminal
@@ -64,21 +77,23 @@ python -m pytest tests/ -q
 python scripts/run_market_splitting.py --demo
 ```
 
-134 tests, about a second, no network. The demo plants two known splits in a
-synthetic week, so the output is verifiable by eye before real data arrives.
+166 tests, under two seconds, no network and no credentials. The demo plants two
+known splits in a synthetic week, so the output is verifiable by eye before real
+data arrives.
 
 ## Run it with real data
 
-1. Get an ENTSO-E security token (see below).
-2. `cp .env.example .env` and fill in the token.
+1. Get an ENTSO-E security token and an ESIOS token (see below).
+2. `cp .env.example .env` and fill them in.
 3. ```bash
    export $(grep -v '^#' .env | xargs)
    python scripts/build_medallion.py --start 2026-08-01 --days 31
    python scripts/explore.py episodes
    ```
 
-`GUIDE.md` covers the rest: exploring the tables, investigating a single
-interval, the labelling workflow, and running the agent.
+[GUIDE.md](GUIDE.md) covers the rest: exploring the tables, investigating a
+single interval, running the same medallion on Databricks, the labelling
+workflow, and running the agent.
 
 ### ENTSO-E token
 
@@ -92,41 +107,78 @@ interval, the labelling workflow, and running the agent.
 
 Request one from `consultasios@ree.es`. The token is personal to the account it
 was issued to. REE's terms require that anything published reads from your own
-server rather than from theirs, so the web service must never call ESIOS
+server rather than from theirs, so a web front end must never call ESIOS
 directly.
 
 ## What the numbers have been checked against
 
-**Prices, against OMIE.** ENTSO-E and OMIE publish the same settled day-ahead
-prices through entirely separate channels. Agreement is exact to four decimal
-places across 96 intervals.
+Two of these compare against publishers that share no code with this project.
+Both run as gold tables on every pipeline execution rather than as a script
+somebody has to remember to invoke.
 
-**Cost, against REE.** Across 60 market days this project computes 11,302,847
-EUR of extra import cost against REE's published congestion rent of 11,303,022
-EUR, a difference of 0.0015%. Both descend from the same market clearing, so
-this is a check on the implementation rather than an independent measurement.
-It is still a demanding one, and `ROADMAP.md` explains why and accounts for the
-residual in full.
+**Prices, against OMIE.** ENTSO-E and OMIE publish the same settled day-ahead
+prices through entirely separate channels. `gold_price_source_agreement`
+compares them interval by interval and reports a disagreement rather than hiding
+one. Across 6,240 intervals the two publishers agree on every single one, and
+the largest difference is zero: not within the one cent tolerance, identical.
+
+That is stronger evidence than it looks. The Iberian market day runs from local
+midnight in CET rather than from UTC midnight, the day is 96 quarter hourly
+intervals, and ENTSO-E omits repeated values from its XML. An error in any of
+those would misalign the two series and show up here immediately.
+
+Which OMIE column carries Portugal is decided by fitting both assignments and
+taking the smaller error, because the file names neither column and the question
+is only answerable on a day when the zones actually priced apart.
+
+**Cost, against REE.** `gold_split_episodes.extra_cost_eur` is the premium
+Portugal paid multiplied by the energy actually imported while the zones priced
+apart, computed from ENTSO-E prices and schedules. REE publishes the congestion
+rent on the same border, and `gold_cost_validation` compares them per market
+day. Across 66 market days:
+
+| | |
+|---|---|
+| This project | 11,518,200 EUR |
+| REE congestion rent | 11,518,375 EUR |
+| Difference | -0.0015% |
+
+Both series descend from the same market clearing, so this is a check on the
+implementation rather than an independent measurement. It is still a demanding
+one, and [ROADMAP.md](ROADMAP.md) explains why and accounts for the residual in
+full.
 
 **Explanations, against the retrieved evidence.** Every figure the agent writes
-is matched against the set of values that were retrieved. On the first five
-labelled episodes, 5 of 5 explanations passed without a retry. That is a small
-sample and the verifier has not yet rejected a live draft, so it is reported as
-a first result rather than a finding.
+is matched against the set of values that were retrieved, and an explanation
+that fails is never returned. Over all 48 labelled episodes:
+`databricks-claude-haiku-4-5` produced 48 grounded explanations out of 48, and
+`databricks-claude-opus-4-5` 47 out of 48. The single rejection is the larger
+model converting 0.75 hours into "45 minutes", which is arithmetic the prompt
+forbids and the check exists to catch.
+
+The honest reading of that is in [ROADMAP.md](ROADMAP.md): in 96 drafts neither
+model invented a number, and the small model is as grounded as the large one.
 
 ## What is not here yet
 
-- Lakeflow declarative pipeline definitions
-- Databricks Vector Search over the notice text, with point in time correctness
+- Databricks Vector Search over the notice text. Retrieval today is a direct
+  A78 query with the point in time filter applied in Python.
+- MLflow tracing and the Mosaic AI Agent Framework wrapper around the agent.
+- A scheduled Job running ingestion and then the pipeline. Both run on demand.
+- Asset Bundles and CI/CD.
 - Lakebase read models and the change feed back into Delta, blocked on
-  authentication (see `ROADMAP.md`)
-- The web service serving gold data, currently sign in only
-- REN Datahub for the Portuguese generation mix
+  authentication (see [ROADMAP.md](ROADMAP.md)).
+- The web service serving gold data. It deploys and signs in, and serves
+  nothing.
+- REN Datahub for the Portuguese generation mix.
 
 ## Known gotchas already handled
 
+Each of these cost time to find. They are recorded because the next person, or
+the next me, will otherwise pay for them twice.
+
 **Sparse Points.** ENTSO-E omits a `Point` when its value repeats the previous
-one. Trusting `len(Points)` gives you a short day and misaligns every timestamp
+one. Trusting `len(Points)` gives a short day and misaligns every timestamp
 after the first gap. The parser forward fills to the count implied by the time
 interval and resolution.
 
@@ -141,6 +193,19 @@ hardcoding the namespace.
 a data outage stitches two unrelated splits into one and the duration figure
 becomes wrong in a way nobody notices.
 
+**A landing zone is not a request.** The local build parses the responses it
+just asked for, so it never sees an interval twice. A pipeline reading a Volume
+does: overlapping backfills leave the same day in two documents, and the
+duplicate guard refuses to pick one. `pipeline/dedupe.py` resolves it the way
+the transparency platform does, with the later publication superseding the
+earlier one.
+
+**Spark hands back naive timestamps.** The market day is found by converting to
+CET, which a timestamp with no timezone cannot do. `market_time.as_utc` restores
+it at the one boundary where data leaves Spark. Localising wherever the data
+happens to be read would be worse than the crash, because the market day begins
+at local midnight and the wrong zone moves every boundary silently.
+
 **Facts must come from one interval.** The fact sheet takes the prices, the
 capacity and the flow from the single worst interval rather than a maximum here
 and a minimum there. Mixing them produced evidence that could not be reconciled,
@@ -148,7 +213,14 @@ a spread that was not the difference of the two prices and a flow larger than
 the capacity, and a model handed that writes something false through no fault of
 its own.
 
+**A verifier that rejects honest text is worse than none.** Three separate
+false positives had to be fixed before the numeric check was usable: prose dates
+("published on 25 June 2026"), the settlement interval length, and digits inside
+a retrieved asset name (`AT 2 400/220 SRM`). Negative prices written with the
+typographic minus sign were a fourth. Every one is now a test.
+
 **`DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` are reserved names.**
 The Databricks SDK picks them up and attempts machine to machine auth, which
-overrides your CLI profile and fails. The app's OAuth credentials are therefore
-named `APP_OAUTH_CLIENT_ID` and `APP_OAUTH_CLIENT_SECRET`.
+overrides the CLI profile and fails with `invalid_client`. The app's OAuth
+credentials are therefore named `APP_OAUTH_CLIENT_ID` and
+`APP_OAUTH_CLIENT_SECRET`.
