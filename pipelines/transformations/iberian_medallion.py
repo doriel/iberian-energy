@@ -85,6 +85,7 @@ from iberian.analysis.market_splitting import (  # noqa: E402
     flag_decoupling,
 )
 from iberian.config import EIC_PORTUGAL, EIC_SPAIN  # noqa: E402
+from iberian.market_time import as_utc  # noqa: E402
 from iberian.parsing.entsoe_prices import (  # noqa: E402
     parse_day_ahead_prices,
     parse_quantity_series,
@@ -389,6 +390,12 @@ def _events():
 
 def _rebuild(events: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Split the stacked frame back apart and call the tested functions."""
+    # Spark returns timestamps with no timezone, and the market day is found by
+    # converting to CET, which a naive timestamp cannot do. Restoring UTC here,
+    # at the one boundary where the data crosses out of Spark, keeps every
+    # function downstream working on the same instants the local build sees.
+    events = as_utc(events, "ts_utc", "landed_at")
+
     prices = events[events["kind"] == "price"].rename(
         columns={"value": "price_eur_mwh"}
     )

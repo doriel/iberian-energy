@@ -40,3 +40,28 @@ def market_day_range(start_day: date, days: int) -> tuple[datetime, datetime]:
 def to_market_day(ts_utc: datetime) -> date:
     """Which market day a UTC instant belongs to."""
     return ts_utc.astimezone(_TZ).date()
+
+
+def as_utc(frame, *columns: str):
+    """Make timestamp columns tz-aware in UTC, and say so when they are not.
+
+    Spark hands a pandas function timestamps without a timezone. `to_market_day`
+    converts to CET to find the market day, which a naive timestamp cannot do,
+    so the whole gold build fails at the boundary between the two worlds.
+
+    The tempting fix is to localize wherever the data happens to be read. That
+    would be worse than the crash: the market day begins at local midnight, so
+    localizing into the wrong zone shifts every boundary by an hour or two and
+    nothing raises. Everything that crosses this boundary is UTC by
+    construction, having come from an ENTSO-E instant, so it is localized as
+    UTC and anything already carrying a zone is converted to it.
+    """
+    import pandas as pd
+
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        values = pd.to_datetime(out[column], utc=True, errors="coerce")
+        out[column] = values
+    return out
