@@ -37,8 +37,16 @@ variables:
       into the bundle as well is the obvious next step and is not done yet.
     default: e90f31df-109b-4f93-9ac4-3392af98af65
   git_branch:
-    description: Branch the Job reads its notebook from.
+    description: >-
+      Branch the Job reads its notebooks from, and the branch the publish task
+      commits the dashboard data back to. One branch on purpose: the deployed
+      page should be built by the same code that is running.
     default: main
+  github_repo:
+    description: >-
+      owner/repo for the publish task's contents API call. Not derived from
+      git_source, because that is a URL and this is not.
+    default: doriel/iberian-energy
 
 include:
   - resources/*.yml

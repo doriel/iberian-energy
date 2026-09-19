@@ -1,0 +1,1 @@
+"""Getting a built artefact out of the lakehouse and in front of a reader."""

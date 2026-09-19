@@ -6,18 +6,26 @@ needs a Databricks account, and none of the three target users has one. REE's
 terms say the same thing from the other direction: what gets published has to be
 served from our own infrastructure rather than by calling theirs.
 
-So the data is published. This reads the gold tables, recomputes the two
-validations from what is already on disk, and writes a single JSON document.
-Nothing here calls an API and nothing needs a warehouse, which means the export
-is reproducible on a laptop and in CI, and the file is small enough to deploy
-with the application.
+So the data is published. This reads the gold tables and writes a single JSON
+document. The file is small enough to deploy with the application, and nothing
+in it needs a warehouse at request time.
+
+There are two places the gold tables live, and one payload builder for both:
+
+    LocalFiles      data/lakehouse/**.parquet, built by scripts/build_medallion.py
+    UnityCatalog    Delta tables, written by the declarative pipeline
+
+The local build does not produce the two validation tables, so on that path they
+are recomputed from silver and from the stored ESIOS payloads. On Databricks the
+pipeline already owns them as tables and they are read rather than recomputed.
+Either way the numbers come out of the same functions in iberian.analysis.
 
     python scripts/export_public_data.py
     python scripts/export_public_data.py --out app/public/data.json
 
 The interval series is written as parallel arrays rather than a list of objects.
-Sixty six market days is about 6,300 intervals, and repeating six key names on
-every one of them triples the file for nothing.
+Sixty market days is about 5,800 intervals, and repeating six key names on every
+one of them triples the file for nothing.
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ from iberian.ingestion.esios import (  # noqa: E402
     congestion_rent_by_day,
     to_frame,
 )
+from iberian.market_time import as_utc  # noqa: E402
 
 #: Document codes as a reader would check them. Extracted from the explanation
 #: text rather than stored separately, because the agent is required to name its
@@ -51,25 +60,64 @@ from iberian.ingestion.esios import (  # noqa: E402
 _SOURCE = re.compile(r"\bA\d{2}\b")
 
 
-def read_gold(root: Path, name: str) -> pd.DataFrame:
-    path = root / "gold" / f"{name}.parquet"
-    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+class Source:
+    """Where a named table comes from.
+
+    A table that does not exist returns an empty frame rather than raising. The
+    builder uses that to tell the two environments apart without being told
+    which one it is running in.
+    """
+
+    def table(self, name: str) -> pd.DataFrame:
+        raise NotImplementedError
+
+    def esios_payloads(self) -> pd.DataFrame:
+        """Raw ESIOS indicator readings, where they are reachable as files."""
+        return pd.DataFrame()
 
 
-def read_silver(root: Path, name: str) -> pd.DataFrame:
-    path = root / "silver" / f"{name}.parquet"
-    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+class LocalFiles(Source):
+    """The laptop build: Parquet under data/lakehouse, payloads under data/raw."""
+
+    def __init__(self, root: Path, raw_dir: Path) -> None:
+        self.root = root
+        self.raw_dir = raw_dir
+
+    def table(self, name: str) -> pd.DataFrame:
+        for layer in ("gold", "silver", "bronze"):
+            path = self.root / layer / f"{name}.parquet"
+            if path.exists():
+                return pd.read_parquet(path)
+        return pd.DataFrame()
+
+    def esios_payloads(self) -> pd.DataFrame:
+        responses = []
+        for path in sorted(self.raw_dir.glob("esios/indicator=*/*.json")):
+            indicator_id = int(path.parent.name.split("=", 1)[1])
+            responses.append(
+                IndicatorResponse(indicator_id=indicator_id, content=path.read_bytes())
+            )
+        return to_frame(responses) if responses else pd.DataFrame()
 
 
-def esios_frame(raw_dir: Path) -> pd.DataFrame:
-    """Every ESIOS payload on disk, parsed. No network, no token."""
-    responses = []
-    for path in sorted(raw_dir.glob("esios/indicator=*/*.json")):
-        indicator_id = int(path.parent.name.split("=", 1)[1])
-        responses.append(
-            IndicatorResponse(indicator_id=indicator_id, content=path.read_bytes())
-        )
-    return to_frame(responses) if responses else pd.DataFrame()
+class UnityCatalog(Source):
+    """The workspace: Delta tables the declarative pipeline owns.
+
+    Every table here is small. The largest is one row per settlement interval,
+    which is a few thousand rows over the window this project covers, so
+    collecting to pandas is the cheap option rather than the reckless one.
+    """
+
+    def __init__(self, spark, catalog: str, schema: str) -> None:
+        self.spark = spark
+        self.catalog = catalog
+        self.schema = schema
+
+    def table(self, name: str) -> pd.DataFrame:
+        full = f"{self.catalog}.{self.schema}.{name}"
+        if not self.spark.catalog.tableExists(full):
+            return pd.DataFrame()
+        return self.spark.table(full).toPandas()
 
 
 def number(value, digits: int = 2):
@@ -111,33 +159,42 @@ def load_labels(path: Path) -> dict[str, dict]:
     }
 
 
-def build(root: Path, raw_dir: Path, evaluation: Path) -> dict:
-    intervals = read_gold(root, "gold_interval_premium")
-    episodes = read_gold(root, "gold_split_episodes")
-    profile = read_gold(root, "gold_daily_profile")
+def build(source: Source, evaluation: Path) -> dict:
+    intervals = source.table("gold_interval_premium")
+    episodes = source.table("gold_split_episodes")
+    profile = source.table("gold_daily_profile")
 
     if intervals.empty or episodes.empty:
         raise SystemExit(
-            f"No gold tables under {root}. Run scripts/build_medallion.py first."
+            "No gold tables found. Run scripts/build_medallion.py, or point this "
+            "at a catalog where the pipeline has run."
         )
 
-    intervals = intervals.sort_values("ts_utc").reset_index(drop=True)
+    # Spark hands back naive timestamps and Parquet hands back tz-aware ones.
+    # Fixing that here means the rest of this function cannot tell the
+    # difference, and the epoch seconds in the series are right either way.
+    intervals = as_utc(intervals, "ts_utc").sort_values("ts_utc").reset_index(drop=True)
+    episodes = as_utc(episodes, "start_utc", "end_utc")
+
     explanations = load_explanations(evaluation / "explanations.jsonl")
     labels = load_labels(evaluation / "episodes.csv")
 
-    # --- the two validations, recomputed from what is on disk ---------------
-    prices = read_silver(root, "silver_entsoe_prices")
-    omie = read_silver(root, "silver_omie_prices")
-    agreement = pd.DataFrame()
-    if not prices.empty and not omie.empty:
-        agreement = price_source_agreement(
-            build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN), omie
-        )
+    # --- the two validations ---------------------------------------------------
+    # Read them where the pipeline owns them, recompute them where it does not.
+    agreement = source.table("gold_price_source_agreement")
+    if agreement.empty:
+        prices = source.table("silver_entsoe_prices")
+        omie = source.table("silver_omie_prices")
+        if not prices.empty and not omie.empty:
+            agreement = price_source_agreement(
+                build_spread_series(prices, EIC_PORTUGAL, EIC_SPAIN), omie
+            )
 
-    rent = esios_frame(raw_dir)
-    cost = pd.DataFrame()
-    if not rent.empty:
-        cost = cost_validation(episodes, congestion_rent_by_day(rent))
+    cost = source.table("gold_cost_validation")
+    if cost.empty:
+        rent = source.esios_payloads()
+        if not rent.empty:
+            cost = cost_validation(episodes, congestion_rent_by_day(rent))
 
     # --- episodes, newest and worst first ------------------------------------
     episode_rows = []
@@ -261,6 +318,35 @@ def build(root: Path, raw_dir: Path, evaluation: Path) -> dict:
     }
 
 
+def serialise(payload: dict) -> bytes:
+    """The exact bytes that get written or pushed, from either entry point.
+
+    Separators without spaces, because this file is shipped rather than read.
+    allow_nan=False so a NaN that slipped through fails here instead of
+    producing a file that every JSON parser except Python's rejects.
+    """
+    return json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def summarise(payload: dict) -> list[str]:
+    head, coverage = payload["headline"], payload["coverage"]
+    lines = [
+        f"{coverage['days']} market days, {coverage['intervals']} intervals",
+        f"{head['episodes']} episodes, {head['explained']} with an explanation",
+    ]
+    if "price_agreeing" in head:
+        lines.append(
+            f"OMIE agreement: {head['price_agreeing']}/{head['price_intervals']}, "
+            f"worst difference {head['worst_price_difference']}"
+        )
+    if "cost_difference_pct" in head:
+        lines.append(
+            f"REE congestion rent: {head['ree_rent_eur']:,.0f} EUR against "
+            f"{head['total_cost_eur']:,.0f}, {head['cost_difference_pct']}%"
+        )
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default="data/lakehouse")
@@ -269,28 +355,18 @@ def main() -> int:
     parser.add_argument("--out", default="app/public/data.json")
     args = parser.parse_args()
 
-    payload = build(Path(args.root), Path(args.raw_dir), Path(args.evaluation))
+    payload = build(
+        LocalFiles(Path(args.root), Path(args.raw_dir)), Path(args.evaluation)
+    )
+    body = serialise(payload)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    # Separators without spaces, because this file is shipped rather than read.
-    out.write_text(json.dumps(payload, separators=(",", ":"), allow_nan=False))
+    out.write_bytes(body)
 
-    head = payload["headline"]
-    coverage = payload["coverage"]
-    print(f"{out}  {out.stat().st_size / 1024:.0f} KB")
-    print(f"  {coverage['days']} market days, {coverage['intervals']} intervals")
-    print(f"  {head['episodes']} episodes, {head['explained']} with an explanation")
-    if "price_agreeing" in head:
-        print(
-            f"  OMIE agreement: {head['price_agreeing']}/{head['price_intervals']}, "
-            f"worst difference {head['worst_price_difference']}"
-        )
-    if "cost_difference_pct" in head:
-        print(
-            f"  REE congestion rent: {head['ree_rent_eur']:,.0f} EUR against "
-            f"{head['total_cost_eur']:,.0f}, {head['cost_difference_pct']}%"
-        )
+    print(f"{out}  {len(body) / 1024:.0f} KB")
+    for line in summarise(payload):
+        print(f"  {line}")
     return 0
 
 

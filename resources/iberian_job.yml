@@ -83,6 +83,27 @@ resources:
             # would reprocess every file since July, every night.
             full_refresh: false
 
+        - task_key: publish
+          depends_on:
+            - task_key: transform
+          notebook_task:
+            notebook_path: pipelines/02_publish_dashboard
+            source: GIT
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              secret_scope: ${var.secret_scope}
+              repo: ${var.github_repo}
+              branch: ${var.git_branch}
+              data_path: app/public/data.json
+          environment_key: Default
+
+          # Safe to retry: the write reads the file's current sha first, so a
+          # second attempt either commits or finds the data already there.
+          max_retries: 1
+          min_retry_interval_millis: 60000
+          timeout_seconds: 900
+
       environments:
         - environment_key: Default
           spec:
