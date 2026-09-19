@@ -72,8 +72,8 @@ dbutils.widgets.removeAll()
 dbutils.widgets.text("catalog", "bootcamp_students", "Unity Catalog")
 dbutils.widgets.text("schema", "doriel", "Schema")
 dbutils.widgets.text("volume", "raw", "Volume for bronze")
-dbutils.widgets.text("start_day", "2026-09-01", "First market day (YYYY-MM-DD)")
-dbutils.widgets.text("days", "7", "Number of market days")
+dbutils.widgets.text("start_day", "", "First market day (YYYY-MM-DD, blank = recent)")
+dbutils.widgets.text("days", "3", "Number of market days")
 dbutils.widgets.text("secret_scope", "iberian", "Secret scope")
 
 CATALOG = dbutils.widgets.get("catalog").strip()
@@ -91,7 +91,8 @@ if not CATALOG:
 VOLUME_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
 print(f"Target   {CATALOG}.{SCHEMA}")
 print(f"Landing  {VOLUME_ROOT}")
-print(f"Window   {DAYS} market day(s) from {START_DAY}")
+print(f"Window   {DAYS} market day(s) from "
+      f"{START_DAY or 'the most recent, ending today'}")
 
 # COMMAND ----------
 
@@ -192,7 +193,18 @@ from iberian.ingestion.omie import OmieClient  # noqa: E402
 from iberian.ingestion.open_meteo import LOCATIONS, OpenMeteoClient  # noqa: E402
 from iberian.market_time import market_day_range  # noqa: E402
 
-START = date.fromisoformat(START_DAY)
+# A blank start day means "the last DAYS market days, ending today". That is
+# what a scheduled run needs, and it keeps the schedule out of the Job
+# definition: the Job passes no date at all and the window follows the calendar.
+# Naming an explicit day is still how a backfill is done.
+#
+# The default window is three days rather than one on purpose. ENTSO-E
+# republishes corrected documents, and a trailing window re-fetches the last few
+# days so a correction is picked up. Landing the same day twice is safe: the
+# pipeline keeps the later publication.
+START = date.fromisoformat(START_DAY) if START_DAY else (
+    date.today() - timedelta(days=DAYS - 1)
+)
 DAY_LIST = [START + timedelta(days=offset) for offset in range(DAYS)]
 WINDOW_START, WINDOW_END = market_day_range(START, DAYS)
 
