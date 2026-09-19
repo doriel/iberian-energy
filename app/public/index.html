@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en" data-palette="#2a78d6,#eb6834">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIBEL market splitting</title>
+<meta name="description" content="When Portugal and Spain price apart, how long it lasts, what it costs, and why.">
+<style>
+/* ---------------------------------------------------------------------------
+   Tokens. Roles, never raw hex in the body. The dark values are declared twice
+   on purpose: the media query follows the operating system, the data-theme
+   scope follows the toggle, and the toggle has to win in both directions.
+   --------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+  --plane:        #f9f9f7;
+  --surface:      #fcfcfb;
+  --ink:          #0b0b0b;
+  --ink-2:        #52514e;
+  --ink-muted:    #898781;
+  --grid:         #e1e0d9;
+  --axis:         #c3c2b7;
+  --hairline:     rgba(11,11,11,0.10);
+  --series-1:     #2a78d6;
+  --series-2:     #eb6834;
+  --good:         #0ca30c;
+  --warning:      #fab219;
+  --serious:      #ec835a;
+  --critical:     #d03b3b;
+  --wash:         rgba(42,120,214,0.08);
+  --shadow:       0 1px 2px rgba(11,11,11,0.05), 0 8px 24px rgba(11,11,11,0.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --plane:      #0d0d0d;
+    --surface:    #1a1a19;
+    --ink:        #ffffff;
+    --ink-2:      #c3c2b7;
+    --ink-muted:  #898781;
+    --grid:       #2c2c2a;
+    --axis:       #383835;
+    --hairline:   rgba(255,255,255,0.10);
+    --series-1:   #3987e5;
+    --series-2:   #d95926;
+    --wash:       rgba(57,135,229,0.14);
+    --shadow:     0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.3);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane:      #0d0d0d;
+  --surface:    #1a1a19;
+  --ink:        #ffffff;
+  --ink-2:      #c3c2b7;
+  --ink-muted:  #898781;
+  --grid:       #2c2c2a;
+  --axis:       #383835;
+  --hairline:   rgba(255,255,255,0.10);
+  --series-1:   #3987e5;
+  --series-2:   #d95926;
+  --wash:       rgba(57,135,229,0.14);
+  --shadow:     0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.3);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--plane);
+  color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px 96px; }
+
+/* --- header --------------------------------------------------------------- */
+header { padding: 40px 0 8px; }
+.eyebrow {
+  font-size: 12px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--ink-muted); margin: 0 0 10px;
+}
+h1 { font-size: clamp(26px, 4.4vw, 38px); line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.02em; }
+.standfirst { margin: 0; max-width: 62ch; color: var(--ink-2); font-size: 16px; }
+.meta { margin-top: 14px; font-size: 13px; color: var(--ink-muted); }
+.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.theme {
+  flex: none; background: var(--surface); color: var(--ink-2); cursor: pointer;
+  border: 1px solid var(--hairline); border-radius: 999px; padding: 7px 13px;
+  font: inherit; font-size: 13px; margin-top: 4px;
+}
+.theme:hover { color: var(--ink); }
+
+/* --- stat tiles ----------------------------------------------------------- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 28px 0 8px; }
+.tile {
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px;
+  padding: 16px 18px; box-shadow: var(--shadow);
+}
+.tile .label { font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-muted); }
+.tile .value { font-size: 30px; line-height: 1.1; margin: 8px 0 4px; letter-spacing: -0.02em; }
+.tile .note { font-size: 13px; color: var(--ink-2); }
+
+/* --- tabs ----------------------------------------------------------------- */
+nav.tabs {
+  display: flex; gap: 4px; margin: 34px 0 20px; border-bottom: 1px solid var(--hairline);
+  overflow-x: auto; scrollbar-width: none;
+}
+nav.tabs::-webkit-scrollbar { display: none; }
+nav.tabs button {
+  background: none; border: 0; border-bottom: 2px solid transparent; color: var(--ink-muted);
+  font: inherit; font-weight: 500; padding: 10px 14px; cursor: pointer; white-space: nowrap;
+}
+nav.tabs button:hover { color: var(--ink); }
+nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--series-1); }
+section[hidden] { display: none; }
+
+/* --- panels & charts ------------------------------------------------------ */
+.panel {
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px;
+  padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow);
+}
+.panel h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
+.panel .sub { margin: 0 0 18px; color: var(--ink-2); font-size: 14px; max-width: 70ch; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 0 0 12px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+.tools { display: flex; justify-content: flex-end; margin-top: 10px; }
+.link {
+  background: none; border: 0; color: var(--ink-2); font: inherit; font-size: 13px;
+  cursor: pointer; text-decoration: underline; text-underline-offset: 3px; padding: 2px 0;
+}
+.link:hover { color: var(--ink); }
+table.data { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; font-variant-numeric: tabular-nums; }
+table.data th, table.data td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data th { color: var(--ink-muted); font-weight: 600; }
+
+.tip {
+  position: absolute; pointer-events: none; opacity: 0; transition: opacity .09s;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 8px;
+  padding: 8px 10px; font-size: 12.5px; box-shadow: var(--shadow); min-width: 128px;
+  z-index: 4; font-variant-numeric: tabular-nums;
+}
+.tip .t { font-weight: 600; margin-bottom: 4px; }
+.tip .r { display: flex; justify-content: space-between; gap: 14px; color: var(--ink-2); }
+.tip .r b { color: var(--ink); font-weight: 600; }
+
+/* --- filters -------------------------------------------------------------- */
+.filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+.filters label { font-size: 13px; color: var(--ink-muted); display: inline-flex; align-items: center; gap: 7px; }
+select, input[type="search"] {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--hairline);
+  border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px;
+}
+.count { margin-left: auto; font-size: 13px; color: var(--ink-muted); }
+
+/* --- episodes ------------------------------------------------------------- */
+.episode { border: 1px solid var(--hairline); border-radius: 10px; margin-bottom: 10px; background: var(--surface); overflow: hidden; }
+.episode > summary {
+  cursor: pointer; list-style: none; padding: 14px 16px;
+  display: grid; grid-template-columns: 120px 1fr auto; gap: 12px; align-items: baseline;
+}
+.episode > summary::-webkit-details-marker { display: none; }
+.episode > summary:hover { background: var(--wash); }
+.episode .day { font-weight: 600; font-variant-numeric: tabular-nums; }
+.episode .when { color: var(--ink-2); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.episode .figs { display: flex; gap: 18px; font-variant-numeric: tabular-nums; font-size: 13.5px; }
+.episode .figs b { font-weight: 600; }
+.episode .body { padding: 2px 16px 18px; border-top: 1px solid var(--grid); }
+.episode .prose { margin: 14px 0; max-width: 78ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  font-size: 12px; padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--hairline); color: var(--ink-2); background: var(--plane);
+}
+.chip.src { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink); }
+.sev { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.sev.severe .dot { background: var(--critical); }
+.sev.moderate .dot { background: var(--serious); }
+.sev.minor .dot { background: var(--warning); }
+.sev.none .dot { background: var(--axis); }
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 20px; margin: 14px 0 0; }
+.kv div { font-size: 13px; }
+.kv .k { color: var(--ink-muted); }
+.kv .v { font-variant-numeric: tabular-nums; }
+.empty { color: var(--ink-2); padding: 28px 4px; text-align: center; }
+.caveat { font-size: 13px; color: var(--ink-2); border-left: 2px solid var(--axis); padding-left: 12px; margin: 16px 0 0; max-width: 72ch; }
+footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--hairline); font-size: 13px; color: var(--ink-muted); }
+footer a { color: var(--ink-2); }
+@media (max-width: 680px) {
+  .episode > summary { grid-template-columns: 1fr; gap: 6px; }
+  .episode .figs { flex-wrap: wrap; gap: 12px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="top">
+    <div>
+      <p class="eyebrow">MIBEL · Portugal and Spain</p>
+      <h1>When the border fills, Portugal pays more</h1>
+      <p class="standfirst">
+        Portugal and Spain clear at the same electricity price whenever the
+        interconnection has room. When it saturates the two zones price apart,
+        and almost nobody tracks what that costs. Every figure below comes from
+        a published market document, and every explanation names the document it
+        came from.
+      </p>
+      <p class="meta" id="meta">Loading…</p>
+    </div>
+    <button class="theme" id="theme" type="button">Dark</button>
+  </div>
+</header>
+
+<div class="tiles" id="tiles"></div>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" aria-selected="true"  data-tab="episodes">Episodes</button>
+  <button role="tab" aria-selected="false" data-tab="rhythm">When it happens</button>
+  <button role="tab" aria-selected="false" data-tab="border">The border</button>
+  <button role="tab" aria-selected="false" data-tab="checks">How it is checked</button>
+</nav>
+
+<!-- ======================= episodes ======================= -->
+<section id="tab-episodes">
+  <div class="panel">
+    <h2>Every episode, with the evidence behind it</h2>
+    <p class="sub">
+      One row per continuous stretch where the two zones priced apart. The cost is
+      the premium applied to the energy actually imported during the episode, not
+      to Portuguese demand, which would overstate it by orders of magnitude.
+    </p>
+    <div class="filters">
+      <label>Market day
+        <select id="f-day"><option value="">All</option></select>
+      </label>
+      <label>Severity
+        <select id="f-sev">
+          <option value="">All</option>
+          <option value="severe">Severe</option>
+          <option value="moderate">Moderate</option>
+          <option value="minor">Minor</option>
+        </select>
+      </label>
+      <label>Sort
+        <select id="f-sort">
+          <option value="date">Most recent</option>
+          <option value="cost">Costliest</option>
+          <option value="spread">Widest spread</option>
+          <option value="hours">Longest</option>
+        </select>
+      </label>
+      <span class="count" id="f-count"></span>
+    </div>
+    <div id="episodes"></div>
+  </div>
+</section>
+
+<!-- ======================= rhythm ======================= -->
+<section id="tab-rhythm" hidden>
+  <div class="panel">
+    <h2>How often the zones price apart, by hour</h2>
+    <p class="sub">
+      For a manufacturer the question is not what happened once, it is whether one
+      hour is reliably worse than another. Hours are UTC; Iberian local time is one
+      or two hours ahead depending on the season.
+    </p>
+    <div class="chart" id="c-prob"></div>
+    <div class="tools"><button class="link" data-table="c-prob">Show as a table</button></div>
+  </div>
+  <div class="panel">
+    <h2>How much it costs when it does</h2>
+    <p class="sub">
+      Mean premium across every interval of that hour, including the coupled ones
+      where it is zero. A tall bar here is an hour that is both frequently and
+      expensively split.
+    </p>
+    <div class="chart" id="c-prem"></div>
+    <div class="tools"><button class="link" data-table="c-prem">Show as a table</button></div>
+  </div>
+</section>
+
+<!-- ======================= border ======================= -->
+<section id="tab-border" hidden>
+  <div class="panel">
+    <h2>Interconnection utilisation, day by day</h2>
+    <p class="sub">
+      Scheduled flow against the capacity published for the same interval. The
+      daily maximum reaching 1.0 means the border was completely full at some
+      point that day.
+    </p>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--series-1)"></i> Daily maximum</span>
+      <span><i class="swatch" style="background:var(--series-2)"></i> Daily mean</span>
+    </div>
+    <div class="chart" id="c-util"></div>
+    <div class="tools"><button class="link" data-table="c-util">Show as a table</button></div>
+    <p class="caveat">
+      A full border and a price separation happening together is consistency, not
+      proof of cause. Both follow from the same market coupling. That is why
+      saturation is detected from utilisation against capacity rather than from
+      the price spread, and why the two are shown separately.
+    </p>
+  </div>
+  <div class="panel">
+    <h2>What Portugal paid above Spain, day by day</h2>
+    <p class="sub">The widest spread reached on each market day, in EUR/MWh.</p>
+    <div class="chart" id="c-spread"></div>
+    <div class="tools"><button class="link" data-table="c-spread">Show as a table</button></div>
+  </div>
+</section>
+
+<!-- ======================= checks ======================= -->
+<section id="tab-checks" hidden>
+  <div class="panel">
+    <h2>Two publishers, one number</h2>
+    <p class="sub">
+      ENTSO-E and OMIE publish the same settled day-ahead prices through entirely
+      separate channels. Every interval present in both is compared. The Iberian
+      market day runs from local midnight in CET rather than UTC midnight, and
+      ENTSO-E omits a repeated value from its XML instead of publishing it twice,
+      so an error in either would misalign the two series and appear here at once.
+    </p>
+    <div class="tiles" id="check-prices"></div>
+  </div>
+  <div class="panel">
+    <h2>The cost figure, against the system operator</h2>
+    <p class="sub">
+      REE publishes the congestion rent earned on this border. This project
+      computes the premium Portugal paid on the energy actually imported. In
+      implicit market coupling the allocated capacity is the scheduled exchange,
+      so the two are the same quantity approached from opposite ends.
+    </p>
+    <div class="tiles" id="check-cost"></div>
+    <p class="caveat">
+      Both series descend from the same market clearing, so this is a check on the
+      implementation rather than an independent measurement. It is still a
+      demanding one: the market day boundary, the quarter hourly grid, the forward
+      fill of sparse points, the direction of flow and the sign of the spread all
+      have to be right for the figures to agree.
+    </p>
+  </div>
+  <div class="panel">
+    <h2>Explanations that cannot invent a number</h2>
+    <p class="sub">
+      The model never sees market data. It is handed a sheet of retrieved facts,
+      each carrying the document it came from, and every figure it writes is
+      matched back against that sheet. An explanation containing a number that was
+      not retrieved is rejected rather than shown.
+    </p>
+    <div class="tiles" id="check-agent"></div>
+  </div>
+</section>
+
+<footer>
+  <p>
+    Sources: ENTSO-E Transparency Platform (A44 day-ahead prices, A09 scheduled
+    exchanges, A61 day-ahead capacity, A78 transmission unavailability), OMIE,
+    REE ESIOS, Open-Meteo. Data is published from this project's own
+    infrastructure rather than proxied from the publishers.
+  </p>
+  <p id="generated"></p>
+</footer>
+
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Tokens read once from the stylesheet, so the charts never hardcode a hex and
+// a theme change repaints them from the same source as everything else.
+// ---------------------------------------------------------------------------
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+let T = {};
+function readTokens() {
+  T = {
+    s1: css('--series-1'), s2: css('--series-2'),
+    grid: css('--grid'), axis: css('--axis'),
+    ink: css('--ink'), ink2: css('--ink-2'), muted: css('--ink-muted'),
+    surface: css('--surface'),
+  };
+}
+readTokens();
+
+const eur = (v, d = 0) => v == null ? '—' :
+  new Intl.NumberFormat('en-GB', { maximumFractionDigits: d, minimumFractionDigits: d }).format(v);
+const pct = (v, d = 1) => v == null ? '—' : `${v.toFixed(d)}%`;
+const clock = (iso) => new Date(iso).toISOString().slice(11, 16) + 'Z';
+const SVGNS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs = {}, text) => {
+  const node = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (text != null) node.textContent = text;
+  return node;
+};
+
+let DATA = null;
+const charts = [];   // re-rendered on resize and on a theme change
+
+// ---------------------------------------------------------------------------
+// Chart primitives. Hand drawn rather than pulled from a library: the whole
+// page is three chart shapes, and a dependency that has to be loaded from a CDN
+// is a dependency that can fail to load in front of whoever is looking.
+// ---------------------------------------------------------------------------
+const PAD = { top: 14, right: 14, bottom: 30, left: 46 };
+
+function frame(host, height) {
+  host.innerHTML = '';
+  const width = Math.max(320, host.clientWidth);
+  const svg = el('svg', { viewBox: `0 0 ${width} ${height}`, height, role: 'img' });
+  host.appendChild(svg);
+  let tip = host.querySelector('.tip');
+  if (!tip) { tip = document.createElement('div'); tip.className = 'tip'; host.appendChild(tip); }
+  return { svg, width, height, tip };
+}
+
+function ticks(max, count = 4) {
+  const raw = max / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
+  const out = [];
+  for (let v = 0; v <= max + step * 0.001; v += step) out.push(v);
+  return out;
+}
+
+function axes(svg, width, height, maxY, fmt) {
+  const y = v => height - PAD.bottom - (v / maxY) * (height - PAD.top - PAD.bottom);
+  for (const t of ticks(maxY)) {
+    svg.appendChild(el('line', {
+      x1: PAD.left, x2: width - PAD.right, y1: y(t), y2: y(t),
+      stroke: t === 0 ? T.axis : T.grid, 'stroke-width': 1,
+    }));
+    svg.appendChild(el('text', {
+      x: PAD.left - 8, y: y(t) + 4, 'text-anchor': 'end',
+      fill: T.muted, 'font-size': 11,
+    }, fmt(t)));
+  }
+  return y;
+}
+
+/** Vertical bars over a categorical axis. Magnitude by category, so: bars. */
+function barChart(host, rows, { value, label, format, height = 230, everyLabel = 2 }) {
+  const { svg, width, tip } = frame(host, height);
+  const maxY = Math.max(...rows.map(value)) || 1;
+  const y = axes(svg, width, height, maxY, format);
+  const plot = width - PAD.left - PAD.right;
+  const slot = plot / rows.length;
+  const w = Math.max(3, slot - 4);   // a 2px surface gap each side
+
+  rows.forEach((row, i) => {
+    const x = PAD.left + i * slot + (slot - w) / 2;
+    const v = value(row);
+    const top = y(v);
+    svg.appendChild(el('rect', {
+      x, y: top, width: w, height: Math.max(0, y(0) - top),
+      fill: T.s1, rx: Math.min(4, w / 2), 'data-i': i,
+    }));
+    if (i % everyLabel === 0) {
+      svg.appendChild(el('text', {
+        x: x + w / 2, y: height - PAD.bottom + 16, 'text-anchor': 'middle',
+        fill: T.muted, 'font-size': 11,
+      }, label(row)));
+    }
+  });
+
+  // Hit targets are the full column, not the drawn bar: a 3px bar is not a
+  // target anyone can hit.
+  rows.forEach((row, i) => {
+    const hit = el('rect', {
+      x: PAD.left + i * slot, y: PAD.top, width: slot, height: height - PAD.top - PAD.bottom,
+      fill: 'transparent',
+    });
+    hit.addEventListener('pointerenter', () => {
+      tip.innerHTML = `<div class="t">${row.tipTitle}</div>${row.tipRows}`;
+      tip.style.opacity = 1;
+      const x = PAD.left + i * slot + slot / 2;
+      tip.style.left = Math.min(Math.max(8, x - 70), host.clientWidth - 150) + 'px';
+      tip.style.top = Math.max(0, y(value(row)) - 12) + 'px';
+      svg.querySelectorAll('rect[data-i]').forEach(r => r.setAttribute('opacity', r.getAttribute('data-i') == i ? 1 : 0.45));
+    });
+    hit.addEventListener('pointerleave', () => {
+      tip.style.opacity = 0;
+      svg.querySelectorAll('rect[data-i]').forEach(r => r.setAttribute('opacity', 1));
+    });
+    svg.appendChild(hit);
+  });
+}
+
+/** One or two lines over an ordered axis, with a shared crosshair. */
+function lineChart(host, rows, { series, label, format, height = 250, everyLabel = 7 }) {
+  const { svg, width, tip } = frame(host, height);
+  const maxY = Math.max(0.0001, ...rows.flatMap(r => series.map(s => s.value(r) ?? 0)));
+  const y = axes(svg, width, height, maxY, format);
+  const plot = width - PAD.left - PAD.right;
+  const x = i => PAD.left + (rows.length === 1 ? plot / 2 : (i / (rows.length - 1)) * plot);
+
+  const cross = el('line', {
+    x1: 0, x2: 0, y1: PAD.top, y2: height - PAD.bottom,
+    stroke: T.axis, 'stroke-width': 1, opacity: 0,
+  });
+  svg.appendChild(cross);
+
+  for (const s of series) {
+    const d = rows.map((r, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(s.value(r) ?? 0).toFixed(1)}`).join('');
+    svg.appendChild(el('path', {
+      d, fill: 'none', stroke: s.color, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    }));
+  }
+  const dots = series.map(s => {
+    const dot = el('circle', { r: 4.5, fill: s.color, stroke: T.surface, 'stroke-width': 2, opacity: 0 });
+    svg.appendChild(dot);
+    return dot;
+  });
+
+  rows.forEach((row, i) => {
+    if (i % everyLabel) return;
+    svg.appendChild(el('text', {
+      x: x(i), y: height - PAD.bottom + 16, 'text-anchor': 'middle',
+      fill: T.muted, 'font-size': 11,
+    }, label(row)));
+  });
+
+  const hit = el('rect', {
+    x: PAD.left, y: PAD.top, width: plot, height: height - PAD.top - PAD.bottom, fill: 'transparent',
+  });
+  hit.addEventListener('pointermove', (event) => {
+    const box = svg.getBoundingClientRect();
+    const px = (event.clientX - box.left) / box.width * width;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.round((px - PAD.left) / plot * (rows.length - 1))));
+    const row = rows[i];
+    cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('opacity', 1);
+    series.forEach((s, k) => {
+      dots[k].setAttribute('cx', x(i)); dots[k].setAttribute('cy', y(s.value(row) ?? 0));
+      dots[k].setAttribute('opacity', 1);
+    });
+    tip.innerHTML = `<div class="t">${row.tipTitle}</div>${row.tipRows}`;
+    tip.style.opacity = 1;
+    tip.style.left = Math.min(Math.max(8, x(i) - 70), host.clientWidth - 160) + 'px';
+    tip.style.top = '4px';
+  });
+  hit.addEventListener('pointerleave', () => {
+    cross.setAttribute('opacity', 0);
+    dots.forEach(d => d.setAttribute('opacity', 0));
+    tip.style.opacity = 0;
+  });
+  svg.appendChild(hit);
+}
+
+function tipRow(label, value) {
+  return `<div class="r"><span>${label}</span><b>${value}</b></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+function tile(label, value, note) {
+  return `<div class="tile"><div class="label">${label}</div>
+          <div class="value">${value}</div><div class="note">${note}</div></div>`;
+}
+
+function renderTiles() {
+  const h = DATA.headline, c = DATA.coverage;
+  document.getElementById('tiles').innerHTML = [
+    tile('Episodes found', eur(h.episodes),
+         `over ${c.days} market days`),
+    tile('Extra import cost', `€${eur(h.total_cost_eur)}`,
+         'premium on the energy actually imported'),
+    tile('Widest spread', `${eur(h.worst_spread, 2)} <span style="font-size:15px;color:var(--ink-2)">EUR/MWh</span>`,
+         'Portugal above Spain, at its worst'),
+    tile('Intervals priced apart', pct(h.decoupled_share, 1),
+         `of ${eur(c.intervals)} settlement intervals`),
+  ].join('');
+
+  document.getElementById('meta').textContent =
+    `${c.days} market days, ${c.first_day} to ${c.last_day} · ${eur(c.intervals)} quarter hourly intervals`;
+  document.getElementById('generated').textContent =
+    `Published from stored market documents. Data generated ${DATA.generated_at.replace('T', ' ').replace('+00:00', '')} UTC.`;
+
+  const agreeing = h.price_agreeing === h.price_intervals;
+  document.getElementById('check-prices').innerHTML = [
+    tile('Intervals compared', eur(h.price_intervals ?? 0), 'present in both publications'),
+    tile('In agreement', h.price_intervals ? pct(100 * h.price_agreeing / h.price_intervals, agreeing ? 0 : 2) : '—',
+         agreeing ? 'every single one' : 'within 0.01 EUR/MWh'),
+    tile('Largest difference', `${eur(h.worst_price_difference ?? 0, 4)} <span style="font-size:15px;color:var(--ink-2)">EUR/MWh</span>`,
+         h.worst_price_difference === 0 ? 'identical, not merely close' : 'across every compared interval'),
+  ].join('');
+
+  document.getElementById('check-cost').innerHTML = [
+    tile('This project', `€${eur(h.total_cost_eur)}`, 'from ENTSO-E prices and schedules'),
+    tile('REE congestion rent', `€${eur(h.ree_rent_eur ?? 0)}`, 'published by the system operator'),
+    tile('Difference', pct(h.cost_difference_pct ?? 0, 4), 'of the published total'),
+  ].join('');
+
+  document.getElementById('check-agent').innerHTML = [
+    tile('Episodes explained', eur(h.explained), 'each figure traced to a document'),
+    tile('Invented numbers', '0', 'across every explanation published here'),
+    tile('Model', 'Small', 'grounding does the work, not model size'),
+  ].join('');
+}
+
+function severityClass(s) { return ['severe', 'moderate', 'minor'].includes(s) ? s : 'none'; }
+
+function renderEpisodes() {
+  const day = document.getElementById('f-day').value;
+  const sev = document.getElementById('f-sev').value;
+  const sort = document.getElementById('f-sort').value;
+
+  let rows = DATA.episodes.filter(e =>
+    (!day || e.day === day) && (!sev || e.severity === sev));
+
+  const by = {
+    date: (a, b) => b.start.localeCompare(a.start),
+    cost: (a, b) => (b.cost_eur ?? 0) - (a.cost_eur ?? 0),
+    spread: (a, b) => Math.abs(b.peak_spread ?? 0) - Math.abs(a.peak_spread ?? 0),
+    hours: (a, b) => (b.hours ?? 0) - (a.hours ?? 0),
+  };
+  rows = rows.slice().sort(by[sort]);
+
+  document.getElementById('f-count').textContent =
+    `${rows.length} episode${rows.length === 1 ? '' : 's'}`;
+
+  const host = document.getElementById('episodes');
+  if (!rows.length) {
+    host.innerHTML = '<p class="empty">No episode matches these filters.</p>';
+    return;
+  }
+
+  host.innerHTML = rows.map(e => {
+    const sources = (e.sources || []).map(s => `<span class="chip src">${s}</span>`).join('');
+    const prose = e.explanation
+      ? `<p class="prose">${e.explanation}</p>
+         <div class="chips">${sources}<span class="chip">verified: ${e.claims} figures</span></div>`
+      : `<p class="prose" style="color:var(--ink-2)">No explanation has been generated for this
+         episode yet. Nothing is shown rather than something unverified.</p>`;
+    return `
+    <details class="episode">
+      <summary>
+        <span class="day">${e.day}</span>
+        <span class="when">${clock(e.start)} – ${clock(e.end)} · ${e.hours} h</span>
+        <span class="figs">
+          <span><b>${eur(Math.abs(e.peak_spread), 2)}</b> EUR/MWh</span>
+          <span><b>€${eur(e.cost_eur)}</b></span>
+          <span class="sev ${severityClass(e.severity)}"><i class="dot"></i>${e.severity || 'n/a'}</span>
+        </span>
+      </summary>
+      <div class="body">
+        ${prose}
+        <div class="kv">
+          <div><div class="k">Peak premium</div><div class="v">${eur(Math.abs(e.peak_spread), 2)} EUR/MWh, ${e.side} side</div></div>
+          <div><div class="k">Duration</div><div class="v">${e.hours} h over ${e.intervals} intervals</div></div>
+          <div><div class="k">Border saturated</div><div class="v">${e.share_saturated == null ? '—' : pct(e.share_saturated * 100, 0)} of intervals</div></div>
+          <div><div class="k">Extra import cost</div><div class="v">€${eur(e.cost_eur)}</div></div>
+          ${e.cause ? `<div><div class="k">Cause, hand labelled</div><div class="v">${e.cause.replace(/_/g, ' ')}${e.confidence ? ` (${e.confidence})` : ''}</div></div>` : ''}
+        </div>
+      </div>
+    </details>`;
+  }).join('');
+}
+
+function renderCharts() {
+  const hours = DATA.hours.map(h => ({
+    ...h,
+    tipTitle: `${String(h.hour).padStart(2, '0')}:00 UTC`,
+    tipRows: tipRow('Priced apart', pct((h.split_probability ?? 0) * 100, 1))
+           + tipRow('Mean premium', `${eur(h.mean_premium, 2)} EUR/MWh`)
+           + tipRow('Worst premium', `${eur(h.worst_premium, 2)} EUR/MWh`),
+  }));
+
+  const days = DATA.days.map(d => ({
+    ...d,
+    tipTitle: d.day,
+    tipRows: tipRow('Max utilisation', pct((d.max_utilisation ?? 0) * 100, 0))
+           + tipRow('Mean utilisation', pct((d.mean_utilisation ?? 0) * 100, 0))
+           + tipRow('Widest spread', `${eur(d.worst_premium, 2)} EUR/MWh`)
+           + tipRow('Extra cost', `€${eur(d.cost_eur)}`),
+  }));
+
+  charts.length = 0;
+  charts.push(
+    () => barChart(document.getElementById('c-prob'), hours, {
+      value: h => (h.split_probability ?? 0) * 100,
+      label: h => String(h.hour).padStart(2, '0'),
+      format: v => `${v.toFixed(0)}%`,
+    }),
+    () => barChart(document.getElementById('c-prem'), hours, {
+      value: h => h.mean_premium ?? 0,
+      label: h => String(h.hour).padStart(2, '0'),
+      format: v => v.toFixed(0),
+    }),
+    () => lineChart(document.getElementById('c-util'), days, {
+      series: [
+        { value: d => (d.max_utilisation ?? 0) * 100, color: T.s1 },
+        { value: d => (d.mean_utilisation ?? 0) * 100, color: T.s2 },
+      ],
+      label: d => d.day.slice(5),
+      format: v => `${v.toFixed(0)}%`,
+    }),
+    () => barChart(document.getElementById('c-spread'), days, {
+      value: d => d.worst_premium ?? 0,
+      label: d => d.day.slice(5),
+      format: v => v.toFixed(0),
+      everyLabel: 7,
+    }),
+  );
+  charts.forEach(draw => draw());
+}
+
+// Every chart carries a table view. Colour is never the only channel, and a
+// screen reader or a printout gets the numbers rather than a picture of them.
+const TABLES = {
+  'c-prob': () => ['Hour (UTC)', 'Priced apart', 'Mean premium', 'Worst premium',
+    DATA.hours.map(h => [`${String(h.hour).padStart(2, '0')}:00`,
+      pct((h.split_probability ?? 0) * 100, 1), eur(h.mean_premium, 2), eur(h.worst_premium, 2)])],
+  'c-prem': () => TABLES['c-prob'](),
+  'c-util': () => ['Market day', 'Max utilisation', 'Mean utilisation', 'Extra cost',
+    DATA.days.map(d => [d.day, pct((d.max_utilisation ?? 0) * 100, 0),
+      pct((d.mean_utilisation ?? 0) * 100, 0), `€${eur(d.cost_eur)}`])],
+  'c-spread': () => ['Market day', 'Widest spread', 'Intervals apart', 'Extra cost',
+    DATA.days.map(d => [d.day, eur(d.worst_premium, 2), `${d.decoupled} of ${d.intervals}`,
+      `€${eur(d.cost_eur)}`])],
+};
+
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-table]');
+  if (!button) return;
+  const id = button.dataset.table;
+  const panel = button.closest('.panel');
+  const existing = panel.querySelector('table.data');
+  if (existing) { existing.remove(); button.textContent = 'Show as a table'; return; }
+  const [a, b, c, d, rows] = TABLES[id]();
+  const table = document.createElement('table');
+  table.className = 'data';
+  table.innerHTML = `<thead><tr><th>${a}</th><th>${b}</th><th>${c}</th><th>${d}</th></tr></thead>
+    <tbody>${rows.map(r => `<tr>${r.map(v => `<td>${v}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  panel.appendChild(table);
+  button.textContent = 'Hide the table';
+});
+
+// --- tabs, theme, resize ----------------------------------------------------
+document.querySelectorAll('nav.tabs button').forEach(button => {
+  button.addEventListener('click', () => {
+    document.querySelectorAll('nav.tabs button').forEach(b =>
+      b.setAttribute('aria-selected', String(b === button)));
+    document.querySelectorAll('section[id^="tab-"]').forEach(s =>
+      s.hidden = s.id !== `tab-${button.dataset.tab}`);
+    charts.forEach(draw => draw());   // a chart drawn while hidden has no width
+  });
+});
+
+const themeButton = document.getElementById('theme');
+function applyTheme(mode) {
+  document.documentElement.setAttribute('data-theme', mode);
+  themeButton.textContent = mode === 'dark' ? 'Light' : 'Dark';
+  readTokens();
+  charts.forEach(draw => draw());
+  try { localStorage.setItem('theme', mode); } catch (e) { /* private window */ }
+}
+themeButton.addEventListener('click', () =>
+  applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
+
+let resizeTimer;
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => charts.forEach(draw => draw()), 120);
+});
+
+// --- boot -------------------------------------------------------------------
+fetch('data.json')
+  .then(response => response.json())
+  .then(payload => {
+    DATA = payload;
+    const days = document.getElementById('f-day');
+    for (const d of [...new Set(DATA.episodes.map(e => e.day))].sort().reverse()) {
+      days.appendChild(new Option(d, d));
+    }
+    renderTiles();
+    renderEpisodes();
+    renderCharts();
+    ['f-day', 'f-sev', 'f-sort'].forEach(id =>
+      document.getElementById(id).addEventListener('change', renderEpisodes));
+    let stored = null;
+    try { stored = localStorage.getItem('theme'); } catch (e) { /* private window */ }
+    if (stored) applyTheme(stored);
+    else themeButton.textContent =
+      matchMedia('(prefers-color-scheme: dark)').matches ? 'Light' : 'Dark';
+  })
+  .catch(() => {
+    document.getElementById('meta').textContent =
+      'The published data file could not be loaded. Run scripts/export_public_data.py.';
+  });
+</script>
+</body>
+</html>

@@ -1,3 +1,17 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
+# The web service, and nothing else. This is the file Render installs.
+#
+# Short on purpose. The dashboard is served from app/public/data.json, which is
+# built by scripts/export_public_data.py and committed. Nothing at request time
+# reads a Parquet file, queries a warehouse or calls Databricks, so pandas,
+# pyarrow and the SDK stay out of the deploy and out of the cold start.
+#
+#     pip install -r requirements-app.txt
+#     python -m uvicorn app.main:app --reload --port 8000
+#
+# Upper bounds because this is the only surface that is deployed rather than
+# run by hand, and a major release landing on its own during a deploy is not a
+# debugging session worth having.
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
 requests>=2.32
