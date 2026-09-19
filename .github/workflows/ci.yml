@@ -1,0 +1,65 @@
+# Tests and configuration checks on every push and pull request.
+#
+# There is deliberately no deploy step. Personal access tokens are disabled in
+# the boot camp workspace and no service principal is available, so CI has no
+# way to authenticate to Databricks. That is a workspace policy rather than a
+# gap in this repository, and working around it would mean putting a human
+# credential somewhere it does not belong.
+#
+# It costs less than it looks like it should. The Job is configured with
+# git_source, so every run takes its own snapshot of this branch: pushing here
+# is already what changes the code that runs in production. What was missing was
+# anything checking that code first, and that is what this does.
+#
+# The one manual step left is `databricks bundle deploy -t prod`, which updates
+# the Job definition, the schedule and the task parameters. Those change rarely,
+# and when they do it is a deliberate act rather than a side effect of a push.
+#
+# Everything here runs offline, with no credentials and no data on disk.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      # The daily Job commits this file. Running the suite because the market
+      # data changed tells us nothing about the code.
+      - "app/public/data.json"
+      - "**/*.md"
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      # Unit tests over fixtures. A clean checkout is enough, so a failure here
+      # is a real failure rather than a missing file.
+      - name: Test
+        run: python -m pytest -q
+
+      # A notebook_path that resolves to nothing is not caught by deploy, and
+      # shows up four minutes into a run instead, after ingest has already
+      # called three public APIs.
+      - name: Check the bundle points at files that exist
+        run: python scripts/check_bundle_paths.py
+
+      # The web service installs a different, much shorter file. Resolving it
+      # here catches the case where the app gains an import that was only ever
+      # installed as a side effect of the development requirements.
+      - name: Check the app's dependencies resolve on their own
+        run: |
+          python -m venv /tmp/appenv
+          /tmp/appenv/bin/pip install --quiet -r requirements-app.txt
+          /tmp/appenv/bin/python -c "import app.main; print('app imports cleanly')"
