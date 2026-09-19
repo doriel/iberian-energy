@@ -92,9 +92,11 @@ credentials and will use them in preference to a CLI profile, failing with
 
 ## Validated results
 
-Three checks. Two are against publishers that share no code with this project,
-the third is internal but adversarial by construction. All three are recomputed
-by the pipeline rather than by a human running a script.
+Four checks. Two are against publishers that share no code with this project,
+the third is internal but adversarial by construction, and the fourth asks
+whether a striking shape in the data is the market or a fault. The first three
+are recomputed by the pipeline on every run rather than by a human remembering
+to invoke a script.
 
 ### Prices, against OMIE
 
@@ -202,6 +204,51 @@ Each is now a test. The lesson is the one worth carrying: writing a verifier
 that never rejects honest text is harder than writing the verifier, and a check
 that cries wolf is worse than no check because it trains you to ignore it.
 
+### The hourly concentration, checked rather than assumed
+
+Decoupling is not spread across the day. It concentrates in the middle of it,
+and a concentration that sharp is worth being suspicious of before presenting
+it, because a data fault and a market pattern look identical in a bar chart.
+
+`scripts/check_hourly_shape.py` is the check. Over 5,760 intervals and 61 market
+days:
+
+| UTC hour | Decoupled | Mean utilisation |
+|---|---|---|
+| 05 | 0.0% | 0.15 |
+| 08 | 25.8% | 0.84 |
+| 10 | **36.7%** | **0.91** |
+| 13 | 11.2% | 0.83 |
+| 16 | 1.2% | 0.57 |
+| 19 | 0.0% | 0.09 |
+
+Three things had to hold, and did.
+
+**The distribution has tails.** It rises from 0.4% at 06:00 to a peak at 10:00
+and decays through the afternoon, rather than starting and stopping. A hard
+edged band with exact zeros either side would have been the signature of
+something upstream, not of a market.
+
+**The edges move with the calendar.** In local time the band runs 09-17 in July,
+08-20 in August and 10-22 in September. Solar noon moves through the season, so
+a pattern driven by Spanish solar has to move with it. A pattern pinned to the
+same UTC hours all summer could not be the sun, since nothing physical is
+anchored to UTC.
+
+**Saturation happens where the prices separate and nowhere else.** Mean
+utilisation is 0.15 to 0.27 overnight and peaks at 0.91 in the same hour the
+splits peak. Outside the band the highest utilisation reached at all is 0.70:
+the border is not full, so there is nothing to decouple the zones. There is no
+ceiling short of saturation, which is the shape a generated series has and a
+market does not.
+
+Two honest qualifications. September carries thirteen days and 57 episodes, so
+that month's edges are individual events rather than a band. And the handful of
+splits at 17:00, 18:00 and 20:00 UTC, where utilisation reaches 1.0 with the sun
+already gone, are the evening demand peak rather than the solar flood. They are
+the same measurement of a different mechanism, and lumping them together would
+overstate how single-caused the pattern is.
+
 ## The weather result, corrected
 
 The naive correlation between Spanish solar radiation and the Spanish price is
@@ -248,9 +295,11 @@ a user with no table is a gap in the product.
 
 1. **Manufacturer deciding when to run equipment.** Needs the daily profile and
    the premium by interval: `gold_daily_profile`, `gold_interval_premium`. The
-   worst hours sit in the late morning UTC, which is around midday local and
-   coincides with the Spanish solar peak. The exact profile is not quoted here
-   because the shape of that distribution is an open question: see next steps.
+   worst hour is 10:00 UTC, midday local, decoupled in 36.7% of intervals, and
+   mean utilisation peaks in the same hour at 0.91. The concentration is real
+   and is the actionable part of the product: an hour that is reliably worse is
+   something a manufacturer can schedule around, where a single expensive
+   episode is not.
 2. **Journalist or regulator watcher needing a defensible number with a cause.**
    Needs `gold_split_episodes` plus the attribution, the gap the notices do not
    explain, `gold_cost_validation`, and a written explanation where every figure
@@ -277,10 +326,6 @@ Things that are known to be unresolved, kept here rather than left implicit.
   none to catch. Its strength against fabrication is demonstrated by its tests
   rather than by use, and that distinction should be made out loud rather than
   left for someone to notice.
-- Decoupling in the gold tables falls entirely inside a six hour band in the
-  morning UTC and is exactly zero outside it. That is too clean to be a market
-  pattern and has not been explained. It is listed first under next steps
-  because it would undermine a number already on the published page.
 - Episode grouping runs under a constant key so the whole series stays in one
   frame. The natural partition is `market_day`, which would split an episode
   running past local midnight in two. At a few thousand rows the constant key
@@ -288,25 +333,19 @@ Things that are known to be unresolved, kept here rather than left implicit.
 
 ## Next steps
 
-In priority order. The platform and the delivery path are now the solid parts;
-the remaining risk is in the evidence layer and in one unexplained shape in the
-data.
+In priority order. The platform and the delivery path are now the solid parts,
+and the shape of the hourly distribution has been checked, so the remaining risk
+sits in the evidence layer.
 
-1. **The hourly distribution.** In one build of the gold tables, decoupling
-   appeared only between 07:00 and 12:59 UTC and was exactly zero in the other
-   eighteen hours across sixty days. A market does not respect a boundary that
-   clean. Until this is understood it is an artefact to investigate in the
-   ingestion or the capacity join, not a finding, and the "when it happens" tab
-   of the dashboard should not be presented as one.
-2. **MLflow tracing and the Agent Framework wrapper**, so the evaluation runs
+1. **MLflow tracing and the Agent Framework wrapper**, so the evaluation runs
    are recorded as experiments rather than as files in a repository.
-3. **Vector Search over the notice text**, replacing the direct A78 query. The
+2. **Vector Search over the notice text**, replacing the direct A78 query. The
    point in time filter has to survive the move, or the evaluation numbers leak
    future information.
-4. **Demand forecast error** from the ESIOS series already in silver. This is
+3. **Demand forecast error** from the ESIOS series already in silver. This is
    the missing half of persona 3.
-5. **Resolve the `Pereiros-Rio Maior 1` question**, since it touches the labels.
-6. **A service principal**, if the boot camp administrators will issue one. It
+4. **Resolve the `Pereiros-Rio Maior 1` question**, since it touches the labels.
+5. **A service principal**, if the boot camp administrators will issue one. It
    unblocks both deploying from CI and the Lakebase read models, and the request
    is already drafted.
-7. **REN Datahub** for the Portuguese generation mix.
+6. **REN Datahub** for the Portuguese generation mix.

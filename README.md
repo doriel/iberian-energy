@@ -82,6 +82,7 @@ scripts/
   explain_episodes.py            run the agent and report groundedness
   export_public_data.py          build the dashboard data from the local build
   check_bundle_paths.py          offline check that the bundle points at files
+  check_hourly_shape.py          is the hourly concentration the sun or a fault
 tests/                           synthetic data, no network, no credentials
 data/raw/                        local stand in for the bronze landing zone
 evaluation/                      labelling sheet, vocabulary, agent output
