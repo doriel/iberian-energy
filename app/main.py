@@ -22,10 +22,17 @@ Routes:
 
 Configuration, all from the environment:
     DATABRICKS_HOST           https://dbc-xxxxxxxx-xxxx.cloud.databricks.com
-    DATABRICKS_CLIENT_ID      from the app integration
-    DATABRICKS_CLIENT_SECRET  from the app integration
+    APP_OAUTH_CLIENT_ID       from the app integration
+    APP_OAUTH_CLIENT_SECRET   from the app integration
     DATABRICKS_REDIRECT_URI   must match a registered redirect URL exactly
     DATABRICKS_SCOPES         space separated, defaults to "postgres"
+
+The two credentials are deliberately NOT called DATABRICKS_CLIENT_ID and
+DATABRICKS_CLIENT_SECRET. The Databricks SDK and CLI treat those names as a
+service principal to authenticate with, so any shell that has them set has the
+CLI trying to log in as this web app. That cost an afternoon of invalid_client
+once already, and the fix is to keep the app's credentials out of the SDK's
+namespace rather than to remember not to export them.
 """
 
 from __future__ import annotations
@@ -53,8 +60,8 @@ app = FastAPI(title="MIBEL Market Intelligence")
 PUBLIC = Path(__file__).resolve().parent / "public"
 
 HOST = (os.environ.get("DATABRICKS_HOST") or "").rstrip("/")
-CLIENT_ID = os.environ.get("DATABRICKS_CLIENT_ID", "")
-CLIENT_SECRET = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
+CLIENT_ID = os.environ.get("APP_OAUTH_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("APP_OAUTH_CLIENT_SECRET", "")
 REDIRECT_URI = os.environ.get("DATABRICKS_REDIRECT_URI", "")
 SCOPES = os.environ.get("DATABRICKS_SCOPES", "postgres")
 
@@ -75,8 +82,8 @@ def configured() -> list[str]:
         name
         for name, value in (
             ("DATABRICKS_HOST", HOST),
-            ("DATABRICKS_CLIENT_ID", CLIENT_ID),
-            ("DATABRICKS_CLIENT_SECRET", CLIENT_SECRET),
+            ("APP_OAUTH_CLIENT_ID", CLIENT_ID),
+            ("APP_OAUTH_CLIENT_SECRET", CLIENT_SECRET),
             ("DATABRICKS_REDIRECT_URI", REDIRECT_URI),
         )
         if not value
