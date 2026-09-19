@@ -1,0 +1,91 @@
+# The daily run: fetch what is new, then rebuild the tables from it.
+#
+# Two tasks rather than one, and the split is the same one the code makes. The
+# notebook calls the APIs and lands payloads in the Volume. The declarative
+# pipeline reads the Volume and owns every table. Neither does the other's job,
+# so a rate limited HTTP request never sits inside a unit of work the platform
+# is entitled to retry.
+
+resources:
+  jobs:
+    iberian_daily:
+      # Named for what it does now. It began as ingestion only, and a Job called
+      # `ingest` that also rebuilds eighteen tables misleads whoever reads the
+      # list next.
+      name: iberian-daily
+
+      # Failures only. A success email every day is an email that stops being
+      # read within a week, and then the failure email is not read either.
+      email_notifications:
+        on_failure:
+          - doriel3572@gmail.com
+
+      schedule:
+        # Iberian day-ahead results are published in the early afternoon local
+        # time. Running at 16:00 leaves comfortable margin after publication and
+        # still picks up the following market day.
+        quartz_cron_expression: "0 0 16 * * ?"
+        timezone_id: Europe/Lisbon
+        pause_status: UNPAUSED
+
+      # One run at a time. Two overlapping runs would land the same window twice
+      # and have the pipeline read the Volume mid-write for no benefit.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      # The notebook and the pipeline both read `src/iberian/` from the Git
+      # folder. Pointing the Job at the same branch keeps one copy of the code,
+      # rather than a bundle upload that can drift from what the pipeline runs.
+      git_source:
+        git_url: https://github.com/doriel/iberian-energy
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      tasks:
+        - task_key: ingest
+          notebook_task:
+            notebook_path: pipelines/01_build_medallion
+            source: GIT
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: ${var.volume}
+              secret_scope: ${var.secret_scope}
+              # Three days rather than one. ENTSO-E republishes corrected
+              # documents, and a trailing window re-fetches recent days so a
+              # correction is picked up. Landing a day twice is safe: the
+              # pipeline keeps the later publication.
+              days: "3"
+              # start_day is deliberately not passed. Blank means "ending
+              # today", so the window follows the calendar and the schedule
+              # needs no date arithmetic of its own.
+          environment_key: Default
+
+          # A public API refusing a request once is ordinary weather, not a
+          # reason to lose the day. Retrying is safe for the same reason the
+          # trailing window is: re-landing a payload cannot duplicate a row.
+          max_retries: 2
+          min_retry_interval_millis: 300000     # five minutes
+          retry_on_timeout: true
+
+          # Ingestion takes about two minutes. Ten is not a failure, it is a
+          # warning that something upstream is crawling.
+          timeout_seconds: 1800
+
+        - task_key: transform
+          depends_on:
+            - task_key: ingest
+          pipeline_task:
+            pipeline_id: ${var.pipeline_id}
+            # Never a full refresh on a schedule. The point of Auto Loader is
+            # that it reads only what it has not seen; a nightly full refresh
+            # would reprocess every file since July, every night.
+            full_refresh: false
+
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+
+      performance_target: PERFORMANCE_OPTIMIZED

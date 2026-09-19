@@ -1,0 +1,64 @@
+# Databricks Asset Bundle: the workspace resources as code.
+#
+# The Job was built by clicking, which is fine for finding out what the settings
+# are and wrong as a place to keep them. A definition that lives only in a
+# workspace has no history, no review and no way back from a mistaken edit, and
+# it cannot be recreated anywhere else without repeating the clicking.
+#
+#     databricks bundle validate            # check the definition
+#     databricks bundle deploy -t prod      # push it to the workspace
+#     databricks bundle run iberian_daily -t prod
+#
+# The code itself still comes from GitHub rather than from the bundle upload.
+# That is deliberate: the declarative pipeline already reads the Git folder, and
+# having the Job read a different copy of the same notebook is exactly the two
+# sources of truth this project keeps refusing to have.
+
+bundle:
+  name: iberian-energy
+
+variables:
+  catalog:
+    description: Unity Catalog the tables are written to.
+    default: bootcamp_students
+  schema:
+    description: Schema within that catalog. One per person on a shared workspace.
+    default: doriel
+  volume:
+    description: Volume holding the raw landing zone.
+    default: raw
+  secret_scope:
+    description: Scope holding the ENTSO-E and ESIOS tokens.
+    default: iberian
+  pipeline_id:
+    description: >-
+      The declarative pipeline the Job triggers. Still created in the workspace
+      rather than by this bundle, so it is referenced by id. Moving the pipeline
+      into the bundle as well is the obvious next step and is not done yet.
+    default: e90f31df-109b-4f93-9ac4-3392af98af65
+  git_branch:
+    description: Branch the Job reads its notebook from.
+    default: main
+
+include:
+  - resources/*.yml
+
+targets:
+  # Deploying to dev prefixes every resource name and pauses schedules, so a
+  # test deployment cannot quietly start writing over the real tables or fire on
+  # its own overnight.
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    # Production mode refuses to deploy without an explicit deployment location,
+    # and it is right to. Without it, two people running `deploy -t prod` from
+    # two machines would each write their own copy of the same Job under their
+    # own home folder, and the workspace would quietly hold two schedules firing
+    # against one set of tables. Pinning the path names the single copy.
+    workspace:
+      root_path: /Workspace/Users/doriel3572@gmail.com/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      git_branch: main
