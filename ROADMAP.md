@@ -36,13 +36,15 @@ through the declarative pipeline end to end.
 | Secrets | **done** | Both API tokens in a scope, set into the environment at the notebook boundary, so the modules keep one authentication path across a laptop and the workspace. |
 | Foundation Model serving | **done** | The agent queries a serving endpoint through the SDK, with the endpoint as an argument so models can be compared. |
 | Incremental ingestion | **done** | Auto Loader reads only unseen files. Republished documents are resolved by publication time. |
-| Scheduled Job | **not started** | Ingestion then pipeline, as two tasks. Both run on demand today, and the notebook's date window is still a widget rather than derived from the run date. |
-| Web service on Render | **partial** | Deployed, with Databricks authorization code sign in working end to end. It serves no data. |
+| Scheduled Job | **done** | `iberian-daily`, three tasks, 16:00 Europe/Lisbon. Ingest lands a trailing three day window derived from the run date, transform runs the pipeline, publish commits the dashboard data. |
+| Publishing to the web | **done** | `pipelines/02_publish_dashboard.py` builds the JSON from the gold tables and commits it over the GitHub contents API. Render watches the branch, so the commit is the deploy. Nothing is committed when the data has not changed. |
+| Web service on Render | **done** | The dashboard is served at `/`, from published data, with no sign in. The Databricks authorization code flow still works end to end at `/auth`. |
 | Lakebase, gold sync, CDF back to Delta | **blocked** | The workspace issues OAuth app integrations rather than service principal secrets. See the auth note below. |
 | Databricks Vector Search | **not started** | For the notice text. Retrieval today is a direct A78 query with the point in time filter in Python. |
 | Mosaic AI Agent Framework | **partial** | The agent exists and runs, as plain Python against a serving endpoint. Wrapping it in the framework, with tracing and a registered model, has not been done. |
 | MLflow | **not started** | |
-| Asset Bundles, CI/CD | **not started** | |
+| Asset Bundles | **done** | `databricks.yml` plus `resources/iberian_job.yml`, bound to the existing job id so the run history survived. `edit_mode` is `UI_LOCKED`, so the definition is changed in YAML rather than by clicking. |
+| CI | **partial** | Tests, an offline check that every `notebook_path` resolves and every bundle variable is declared, and an install of the app's own requirements in a clean environment. It does not deploy: see the auth note. |
 
 ### A note on authentication
 
@@ -55,6 +57,14 @@ The consequence shapes the product rather than being a detail of it: anything
 behind the sign in requires an account in this Databricks workspace, which none
 of the three target users has. Public pages therefore have to be served from
 published data rather than from a live query.
+
+The same policy blocks automated deployment. Personal access tokens are
+disabled for this workspace and no service principal is available, so continuous
+integration has no way to authenticate to Databricks. It costs less than it
+sounds: the Job is configured with `git_source` and snapshots the branch on
+every run, so a `git push` already changes the code that runs in production. CI
+therefore checks and does not deploy, and `databricks bundle deploy -t prod`,
+which only changes the Job definition, stays a deliberate manual step.
 
 A second, unrelated trap sits next to this one. The Databricks SDK treats
 `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` as machine to machine
@@ -89,9 +99,11 @@ by the pipeline rather than by a human running a script.
 ### Prices, against OMIE
 
 ENTSO-E and OMIE publish the same settled day-ahead prices through entirely
-separate channels. Across **6,240 intervals the two agree on every one, with a
-largest difference of zero**. Not within the one cent tolerance the check
-allows: identical.
+separate channels. Across the 60 market day window from 2026-07-16 to
+2026-09-13, **5,760 intervals, the two agree on every one, with a largest
+difference of zero**. Not within the one cent tolerance the check allows:
+identical. The live dashboard carries the current figures, which move with each
+daily run.
 
 That is a stronger result than it first sounds. The Iberian market day runs from
 local midnight in CET rather than UTC midnight, the day is 96 quarter hourly
@@ -110,12 +122,12 @@ reason to withhold data.
 `gold_split_episodes.extra_cost_eur` is the premium Portugal paid multiplied by
 the energy actually imported while the zones priced apart, computed from
 ENTSO-E prices and schedules. REE publishes the congestion rent on the same
-border. Across 66 market days:
+border. Across the same 60 market days:
 
 | | |
 |---|---|
-| This project | 11,518,200 EUR |
-| REE congestion rent | 11,518,375 EUR |
+| This project | 11,302,847 EUR |
+| REE congestion rent | 11,303,022 EUR |
 | Difference | -0.0015% |
 
 This is not an independent measurement, since both series descend from the same
@@ -235,10 +247,10 @@ Every gold table must serve one of these users. A table nobody needs can be cut;
 a user with no table is a gap in the product.
 
 1. **Manufacturer deciding when to run equipment.** Needs the daily profile and
-   the premium by interval: `gold_daily_profile`, `gold_interval_premium`. Over
-   60 market days the worst hour is 10:00 UTC, decoupled in 37% of intervals at
-   a mean premium of 12.93 EUR/MWh, which is midday local and coincides with the
-   Spanish solar peak.
+   the premium by interval: `gold_daily_profile`, `gold_interval_premium`. The
+   worst hours sit in the late morning UTC, which is around midday local and
+   coincides with the Spanish solar peak. The exact profile is not quoted here
+   because the shape of that distribution is an open question: see next steps.
 2. **Journalist or regulator watcher needing a defensible number with a cause.**
    Needs `gold_split_episodes` plus the attribution, the gap the notices do not
    explain, `gold_cost_validation`, and a written explanation where every figure
@@ -265,6 +277,10 @@ Things that are known to be unresolved, kept here rather than left implicit.
   none to catch. Its strength against fabrication is demonstrated by its tests
   rather than by use, and that distinction should be made out loud rather than
   left for someone to notice.
+- Decoupling in the gold tables falls entirely inside a six hour band in the
+  morning UTC and is exactly zero outside it. That is too clean to be a market
+  pattern and has not been explained. It is listed first under next steps
+  because it would undermine a number already on the published page.
 - Episode grouping runs under a constant key so the whole series stays in one
   frame. The natural partition is `market_day`, which would split an episode
   running past local midnight in two. At a few thousand rows the constant key
@@ -272,21 +288,25 @@ Things that are known to be unresolved, kept here rather than left implicit.
 
 ## Next steps
 
-In priority order. The platform is now the solid part; the remaining risk is in
-the layers around it.
+In priority order. The platform and the delivery path are now the solid parts;
+the remaining risk is in the evidence layer and in one unexplained shape in the
+data.
 
-1. **A scheduled Job.** Ingestion then pipeline, as two tasks, with the
-   notebook's window derived from the run date instead of a widget. Without it
-   the platform is on demand rather than operating.
-2. **Serve the gold tables from the web service**, from published data rather
-   than a live query, given the authentication constraint above. This is the
-   part the three personas actually touch, and it currently shows nothing.
-3. **MLflow tracing and the Agent Framework wrapper**, so the evaluation runs
+1. **The hourly distribution.** In one build of the gold tables, decoupling
+   appeared only between 07:00 and 12:59 UTC and was exactly zero in the other
+   eighteen hours across sixty days. A market does not respect a boundary that
+   clean. Until this is understood it is an artefact to investigate in the
+   ingestion or the capacity join, not a finding, and the "when it happens" tab
+   of the dashboard should not be presented as one.
+2. **MLflow tracing and the Agent Framework wrapper**, so the evaluation runs
    are recorded as experiments rather than as files in a repository.
-4. **Vector Search over the notice text**, replacing the direct A78 query. The
+3. **Vector Search over the notice text**, replacing the direct A78 query. The
    point in time filter has to survive the move, or the evaluation numbers leak
    future information.
-5. **Demand forecast error** from the ESIOS series already in silver. This is
+4. **Demand forecast error** from the ESIOS series already in silver. This is
    the missing half of persona 3.
-6. **Resolve the `Pereiros-Rio Maior 1` question**, since it touches the labels.
+5. **Resolve the `Pereiros-Rio Maior 1` question**, since it touches the labels.
+6. **A service principal**, if the boot camp administrators will issue one. It
+   unblocks both deploying from CI and the Lakebase read models, and the request
+   is already drafted.
 7. **REN Datahub** for the Portuguese generation mix.

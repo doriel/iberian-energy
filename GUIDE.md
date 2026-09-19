@@ -10,7 +10,10 @@ Start here for the local loop, which is where development happens, then
 
 - [The mental model](#the-mental-model)
 - [Locally](#locally)
+- [The dashboard](#the-dashboard)
 - [On Databricks](#on-databricks)
+- [The daily Job](#the-daily-job)
+- [Continuous integration](#continuous-integration)
 - [The evaluation set](#the-evaluation-set)
 - [Running the agent](#running-the-agent)
 - [Things worth breaking on purpose](#things-worth-breaking-on-purpose)
@@ -56,7 +59,7 @@ export $(grep -v '^#' .env | xargs)
 ### Start here
 
 ```bash
-python -m pytest tests/ -q          # 166 tests, no network, under two seconds
+python -m pytest tests/ -q          # 174 tests, no network, under two seconds
 python scripts/run_market_splitting.py --demo   # whole pipeline, synthetic data
 python scripts/explore.py tables    # what the last run produced
 ```
@@ -151,11 +154,84 @@ real result lives.
 
 ---
 
+## The dashboard
+
+The page all three target users get, with no sign in. It is a single HTML file
+and a single JSON file, so it needs no warehouse, no token and no call to REE at
+request time.
+
+```bash
+pip install -r requirements-app.txt
+python scripts/export_public_data.py
+python -m uvicorn app.main:app --reload --port 8000
+```
+
+Then open `http://127.0.0.1:8000`.
+
+`python -m uvicorn` rather than `uvicorn`. If the system package manager has
+also installed uvicorn, the bare command runs the system Python and cannot see
+anything in the virtual environment, which surfaces as `No module named
+'fastapi'` while fastapi is plainly installed.
+
+| Route | What it is |
+|---|---|
+| `/` | the dashboard |
+| `/data.json` | the published gold data the page reads |
+| `/auth` | Databricks sign in status, and the start of the OAuth flow |
+| `/healthz` | liveness, and whether the data file is actually present |
+
+`/healthz` reports the data file on purpose. A health check that only proves the
+process is up reports green while the page renders empty.
+
+### Where the data comes from
+
+`scripts/export_public_data.py` reads the local Parquet build. The Job runs the
+same builder against the Delta tables, through `iberian.publish.dashboard`, and
+commits the result. Both produce the same document; only the source differs.
+
+One difference between the two paths is deliberate. The local build does not
+write the two validation tables, so on that path they are recomputed from silver
+and from the stored ESIOS payloads. On Databricks the pipeline already owns them
+as tables and they are read rather than recomputed. Either way the numbers come
+out of the same functions in `iberian.analysis.validation`.
+
+**The Job owns `app/public/data.json`.** Run the export locally to look at the
+page, but discard it before committing, or a stale local build overwrites what
+the Job published:
+
+```bash
+git checkout app/public/data.json
+```
+
+### On Render
+
+| Setting | Value |
+|---|---|
+| Build command | `pip install -r requirements-app.txt` |
+| Start command | `python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+| Health check path | `/healthz` |
+
+`$PORT` and `--host 0.0.0.0` are both required: Render assigns the port and
+stops a service that is not listening on it, and without the host it accepts
+connections only from inside the container.
+
+Environment variables are `DATABRICKS_HOST`, `DATABRICKS_REDIRECT_URI`,
+`DATABRICKS_SCOPES`, `APP_OAUTH_CLIENT_ID` and `APP_OAUTH_CLIENT_SECRET`. The
+last two are not called `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`
+for the reason in the troubleshooting section below.
+
+The free instance sleeps when idle. A sign in started before it restarted fails
+with "unknown state", because the pending flow is held in memory; `/callback`
+says so rather than blaming the user.
+
+---
+
 ## On Databricks
 
-Two pieces, in this order: a notebook that fetches and lands, then a pipeline
-that transforms. The notebook writes no tables and the pipeline makes no HTTP
-requests, and neither of those is an accident.
+Three pieces, in this order: a notebook that fetches and lands, a pipeline that
+transforms, and a notebook that publishes. The first writes no tables, the
+second makes no HTTP requests, and the third writes neither tables nor payloads.
+None of those is an accident.
 
 A declarative pipeline is given data and asked to derive tables from it. Putting
 a rate limited API call inside a unit of work the platform is entitled to retry
@@ -172,7 +248,14 @@ saved with the notebook state and this repository is public.
 databricks secrets create-scope iberian
 databricks secrets put-secret iberian entsoe_token
 databricks secrets put-secret iberian esios_token
+databricks secrets put-secret iberian github_token
 ```
+
+Run each without flags and it opens an editor to paste into, which keeps the
+value out of the shell history. `github_token` is a fine grained personal access
+token scoped to this repository alone, with **Contents: Read and write** and
+nothing else. GitHub adds **Metadata: Read-only** by itself, which is required
+for any repository permission.
 
 **Git folder.** Clone the repository into the workspace. The notebook and the
 pipeline both import `src/iberian/` from it rather than carrying copies.
@@ -218,6 +301,22 @@ mistake before a cluster spends minutes on it. Then **Run pipeline**.
 
 Auto Loader reads only the files it has not seen, so a daily run costs seconds.
 Gold is recomputed in full, which at a few thousand rows also costs seconds.
+
+**3. Publishing.** Open `pipelines/02_publish_dashboard.py` and **Run all**. It
+reads the gold tables, builds the same JSON the local export builds, and commits
+it to the branch. Render watches the branch, so the commit is the deploy.
+
+It prints where it found the checkout before it imports anything, which is the
+first thing to read if it fails:
+
+```
+Working directory: /Workspace/Repos/.internal/<id>_commits/<sha>/pipelines
+Repo root:         /Workspace/Repos/.internal/<id>_commits/<sha>
+```
+
+If the data has not changed it prints `unchanged` and commits nothing. Set the
+`force` widget to `yes` to commit anyway, which is worth doing once to prove the
+token works and never on a schedule.
 
 ### The 18 tables
 
@@ -294,6 +393,101 @@ this at the boundary; if a new table skips it, this is the symptom.
 **A stream fails on a cast.** Something is in the landing zone that is not a
 response document. The ESIOS catalogue and the request metadata files are both
 filtered out by name for this reason.
+
+**The publish task cannot import `iberian`.** Read the `Repo root` line it
+prints. The import block is a copy of the one in `01_build_medallion`, which
+works, so a difference there is the thing to look at. Three runs were lost
+inventing a second mechanism before copying the one that was already proven.
+
+**The publish task says `unchanged`.** The data is the same as what is already
+committed, ignoring the timestamp. Usually it means the export was run locally
+and committed by hand. Set `force` to `yes` to override.
+
+**The commit is rejected with a conflict.** Something else wrote to the same
+path between the read and the write. Re-run; the next attempt reads the new sha.
+
+**`git push` is rejected with "fetch first".** The Job committed the data file
+to the branch. `git pull --rebase` then push. Running
+`git config pull.rebase true` once in this repository makes that the default,
+which matters because the Job commits every afternoon.
+
+---
+
+## The daily Job
+
+`iberian-daily` runs the three tasks in order at 16:00 Europe/Lisbon, which
+leaves margin after the Iberian day-ahead results are published in the early
+afternoon.
+
+The definition lives in `resources/iberian_job.yml` and is deployed with the
+Asset Bundle. It was originally built by clicking, which is fine for finding out
+what the settings are and wrong as the place to keep them, then bound to the
+existing job id so the run history survived.
+
+```bash
+databricks bundle validate -t prod
+databricks bundle deploy -t prod
+databricks bundle run iberian_daily -t prod
+```
+
+`edit_mode` is now `UI_LOCKED`: change the Job in the YAML, not in the interface.
+
+### What deploy does and does not do
+
+**`bundle deploy` changes the Job definition only.** The schedule, the tasks,
+the retries, the parameters.
+
+**The code comes from the branch.** The Job is configured with `git_source`, so
+each run takes its own snapshot into
+`/Workspace/Repos/.internal/<id>_commits/<sha>`. A `git push` is therefore what
+changes the code that runs in production.
+
+**The workspace Git folder of the same repository is a different thing and no
+task reads it.** Pulling it changes nothing about what the Job runs. This cost
+three failed runs to establish, and the notebook now prints its own repo root so
+the question can be settled in one line rather than by argument.
+
+### Testing one task without the whole Job
+
+`ingest` and `transform` take about four minutes together. When iterating on
+`publish`, open the run in the UI and run that task alone rather than the Job.
+
+### Trailing window, not one day
+
+`ingest` asks for three market days ending today rather than one. ENTSO-E
+republishes corrected documents, so a trailing window picks up a correction.
+Landing a day twice is safe: `pipeline/dedupe.py` keeps the later publication.
+
+---
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull
+request. Everything in it is offline, with no credentials and no data on disk.
+
+| Step | What it catches |
+|---|---|
+| `pytest -q` | the analysis, the parsers, the verifier, the publisher |
+| `scripts/check_bundle_paths.py` | a `notebook_path` matching no file, or a `${var.x}` that is not declared |
+| a clean install of `requirements-app.txt` | an import the app gained that was only ever installed as a side effect of the development requirements |
+
+Commits to `app/public/data.json` do not trigger it. The Job writes that file
+every afternoon, and running the suite because the market data changed says
+nothing about the code.
+
+**There is no deploy step, deliberately.** Personal access tokens are disabled
+in this workspace and no service principal is available, so CI cannot
+authenticate to Databricks at all. Given that `git push` is already what changes
+the running code, what was actually missing was anything checking the code
+first, and that is what this does. `bundle deploy` stays manual, and the things
+it changes change rarely.
+
+Run the checks locally the way CI does:
+
+```bash
+python -m pytest -q
+python scripts/check_bundle_paths.py
+```
 
 ---
 
