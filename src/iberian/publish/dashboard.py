@@ -150,7 +150,12 @@ def load_labels(path: Path) -> dict[str, dict]:
     }
 
 
-def build(source: Source, evaluation: Path) -> dict:
+def build(source: Source, evaluation: Path | str) -> dict:
+    # Coerced rather than required, because the notebook builds this path with
+    # os.path.join to match the block it shares with 01_build_medallion, and a
+    # TypeError three cells in is a poor way to learn that.
+    evaluation = Path(evaluation)
+
     intervals = source.table("gold_interval_premium")
     episodes = source.table("gold_split_episodes")
     profile = source.table("gold_daily_profile")
