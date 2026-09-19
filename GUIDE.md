@@ -8,16 +8,87 @@ same objects in both cases, which is what makes the numbers comparable.
 Start here for the local loop, which is where development happens, then
 [Databricks](#on-databricks) for the platform.
 
+- [Where everything lives](#where-everything-lives)
 - [The mental model](#the-mental-model)
 - [Locally](#locally)
 - [The dashboard](#the-dashboard)
 - [On Databricks](#on-databricks)
 - [The daily Job](#the-daily-job)
 - [Continuous integration](#continuous-integration)
+- [Tracing and experiments](#tracing-and-experiments)
 - [The evaluation set](#the-evaluation-set)
 - [Running the agent](#running-the-agent)
 - [Things worth breaking on purpose](#things-worth-breaking-on-purpose)
 - [Changing the analysis](#changing-the-analysis)
+
+## Where everything lives
+
+Four places, and which one a file belongs in is decided by what it is allowed to
+import rather than by what it is about.
+
+| Folder | What it is | May import |
+|---|---|---|
+| `src/iberian/` | the library | standard library, pandas, requests. No Databricks, no Spark |
+| `pipelines/` | notebooks and the declarative pipeline | `src/iberian/`, plus Spark and dbutils |
+| `scripts/` | entry points you run at a terminal | `src/iberian/` |
+| `app/` | the web service | nothing from `src/iberian/`: it serves a built file |
+
+That rule is what keeps the test suite at two seconds. The moment a Databricks
+import appears under `src/iberian/`, every test needs a cluster to run.
+
+```
+src/iberian/
+  config.py  market_time.py        settings, and the Iberian market day
+  ingestion/                       API clients, one per source
+  parsing/                         payloads to tidy rows
+  analysis/                        pure functions on dataframes
+  pipeline/                        gold table builders, dedupe
+  agent/
+    facts.py                       retrieved evidence, as sourced facts
+    verify.py                      rejects any figure that was not retrieved
+    explain.py                     the generate, check, retry once loop
+    tracing.py                     MLflow's decorator, or a no-op without it
+    experiment.py                  an evaluation run, as an MLflow run
+  publish/
+    dashboard.py                   gold tables to the published JSON
+    github.py                      commit a built file over the contents API
+
+pipelines/
+  01_build_medallion.py            ingest task: APIs to the Volume
+  02_publish_dashboard.py          publish task: gold to a commit
+  transformations/                 the declarative pipeline, 18 tables
+
+app/
+  main.py                          FastAPI: the dashboard and the OAuth flow
+  public/index.html                the page
+  public/data.json                 written by the Job, not by hand
+
+scripts/                           every entry point, see the sections below
+tests/                             synthetic data, no network, no credentials
+resources/iberian_job.yml          the daily Job
+databricks.yml                     the Asset Bundle
+.github/workflows/ci.yml           tests and checks on every push
+```
+
+### The two MLflow files, and why they are library code
+
+`agent/tracing.py` and `agent/experiment.py` sit under `src/iberian/` rather
+than in `scripts/`, which looks wrong at first because MLflow is a platform
+thing.
+
+They are there because the agent uses them. `facts.py`, `verify.py` and
+`explain.py` are decorated by `tracing.trace`, so it has to be importable
+wherever they are. `experiment.py` is used by `scripts/explain_episodes.py` and
+could have lived there, but then a notebook that wanted to record a run would
+have to import from a scripts directory, which is the shape that cost three
+failed Job runs already.
+
+Neither breaks the no-platform-imports rule, because neither imports MLflow at
+module level. They try, and carry on without it. Run the suite on a machine that
+has never installed MLflow and it passes; install it and three extra tests start
+running against the real decorator.
+
+---
 
 ## The mental model
 
@@ -488,6 +559,68 @@ Run the checks locally the way CI does:
 python -m pytest -q
 python scripts/check_bundle_paths.py
 ```
+
+---
+
+## Tracing and experiments
+
+Every evaluation run records itself. Nothing here is required to get the
+numbers: without MLflow installed the run says so and carries on, which is why
+`iberian/agent/tracing.py` exists at all.
+
+```bash
+# Local, recorded nowhere
+python scripts/explain_episodes.py --limit 3 --labelled-only --no-mlflow
+
+# Recorded in the workspace
+python scripts/explain_episodes.py --limit 3 --labelled-only \
+  --tracking-uri databricks
+```
+
+The run carries the endpoint and the attempt limit as parameters, four metrics,
+`evaluation/explanations.jsonl` as an artifact, and the failing episode keys as
+a tag.
+
+| Metric | Why it is there |
+|---|---|
+| `grounded_rate` | the north star, as a share so runs over different episode counts compare |
+| `first_attempt_rate` | a retry is not a failure, but it is worse, and the final verdict hides it |
+| `claims_per_explanation` | what stops the first metric being vacuous: 100% grounded over prose containing no figures is a perfect and meaningless score |
+| `numeric_claims` | the raw count behind it |
+
+Three spans appear per explanation: `episode_facts` as RETRIEVER,
+`explain` as AGENT and `verify` as PARSER. Read those before reading the code
+when an answer looks wrong, because the trace shows what each step actually
+received rather than what it was supposed to receive.
+
+### Unity Catalog trace storage does not work here
+
+MLflow recommends storing traces in Unity Catalog Delta tables rather than in
+the experiment. The flags exist:
+
+```bash
+export MLFLOW_TRACING_SQL_WAREHOUSE_ID=<a warehouse from `databricks warehouses list`>
+python scripts/explain_episodes.py --limit 3 --labelled-only \
+  --tracking-uri databricks \
+  --experiment /Users/<you>/iberian-energy-agent-uc \
+  --trace-catalog bootcamp_students --trace-schema doriel
+```
+
+It binds, it provisions all four `otel` tables, and it exports nothing. The
+spans table stays at zero rows across runs with the warehouse both cold and
+warm. No cause has been established. ROADMAP.md records what was observed.
+
+**Use a new experiment name if you try it.** A Unity Catalog trace location is
+permanent: once an experiment is bound it cannot be pointed elsewhere, so
+binding the one you already use costs you that experiment.
+
+Reading it back needs the SQL, not the API, because `search_traces` returned
+nothing even when asked correctly:
+
+```sql
+SELECT count(*) FROM <catalog>.<schema>.`<experiment id>_otel_spans`;
+```
+
 
 ---
 

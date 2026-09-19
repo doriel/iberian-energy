@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 
 from iberian.agent.facts import FactSheet
+from iberian.agent.tracing import SpanType, trace
 
 #: Numbers that carry no factual claim. A model writing "the first of two
 #: assets" is not asserting a measurement, and failing it would teach nobody
@@ -172,6 +173,7 @@ def _supports(allowed: float, claim: Claim) -> bool:
     return False
 
 
+@trace(span_type=SpanType.PARSER)
 def verify(text: str, sheet: FactSheet, require_sources: bool = True) -> Verdict:
     """Check an explanation against the facts it was given.
 

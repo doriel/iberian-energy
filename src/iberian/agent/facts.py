@@ -18,6 +18,8 @@ source through, and the sheet is what makes that possible.
 
 from __future__ import annotations
 
+from iberian.agent.tracing import SpanType, trace
+
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -112,6 +114,7 @@ def _number(value) -> float | None:
         return None
 
 
+@trace(span_type=SpanType.RETRIEVER)
 def episode_facts(
     episode: pd.Series,
     intervals: pd.DataFrame,

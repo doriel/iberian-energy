@@ -31,6 +31,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from iberian.agent.experiment import EvaluationRun  # noqa: E402
 from iberian.agent.explain import databricks_completer, explain  # noqa: E402
 from iberian.agent.facts import episode_facts  # noqa: E402
 from iberian.config import EIC_PORTUGAL, EIC_SPAIN, Settings  # noqa: E402
@@ -63,6 +64,32 @@ def main() -> int:
         "--dry-run",
         action="store_true",
         help="print the fact sheets and stop, without calling a model",
+    )
+    parser.add_argument(
+        "--experiment",
+        default="",
+        help="MLflow experiment path; blank uses the project default",
+    )
+    parser.add_argument(
+        "--tracking-uri",
+        default="",
+        help='where to record; "databricks" sends runs and traces to the workspace',
+    )
+    parser.add_argument(
+        "--trace-catalog",
+        default="",
+        help="Unity Catalog catalog for trace storage; needs --trace-schema too",
+    )
+    parser.add_argument(
+        "--trace-schema",
+        default="",
+        help="Unity Catalog schema for trace storage, plus a SQL warehouse in "
+        "MLFLOW_TRACING_SQL_WAREHOUSE_ID. Binding is permanent.",
+    )
+    parser.add_argument(
+        "--no-mlflow",
+        action="store_true",
+        help="do not record this run, even if MLflow is available",
     )
     parser.add_argument(
         "--labelled-only",
@@ -186,6 +213,25 @@ def main() -> int:
     with out_path.open("w") as handle:
         for record in records:
             handle.write(json.dumps(record, default=str) + "\n")
+
+    # Recorded after the file is written, so the artifact logged is the one on
+    # disk rather than a second serialisation that could differ from it.
+    if not args.no_mlflow:
+        run = EvaluationRun(
+            endpoint=args.endpoint,
+            attempts=args.attempts,
+            **({"experiment": args.experiment} if args.experiment else {}),
+            tracking_uri=args.tracking_uri or None,
+            trace_catalog=args.trace_catalog or None,
+            trace_schema=args.trace_schema or None,
+            extra_params={
+                "labelled_only": args.labelled_only,
+                "episodes": len(records),
+            },
+        )
+        print(f"\n{run.describe()}")
+        with run as active:
+            active.record(records, artifact=out_path)
 
     grounded = sum(1 for record in records if record["grounded"])
     first_try = sum(

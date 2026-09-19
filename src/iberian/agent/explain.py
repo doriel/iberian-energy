@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from iberian.agent.facts import FactSheet
+from iberian.agent.tracing import SpanType, trace
 from iberian.agent.verify import Verdict, verify
 
 SYSTEM_PROMPT = """\
@@ -92,6 +93,7 @@ class Explanation:
         return "\n".join(lines)
 
 
+@trace(span_type=SpanType.AGENT)
 def explain(
     sheet: FactSheet,
     complete,

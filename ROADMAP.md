@@ -42,7 +42,9 @@ through the declarative pipeline end to end.
 | Lakebase, gold sync, CDF back to Delta | **blocked** | The workspace issues OAuth app integrations rather than service principal secrets. See the auth note below. |
 | Databricks Vector Search | **not started** | For the notice text. Retrieval today is a direct A78 query with the point in time filter in Python. |
 | Mosaic AI Agent Framework | **partial** | The agent exists and runs, as plain Python against a serving endpoint. Wrapping it in the framework, with tracing and a registered model, has not been done. |
-| MLflow | **not started** | |
+| MLflow tracing | **done** | `agent/tracing.py` resolves `mlflow.trace` once, or a no-op where MLflow is absent, so the library keeps no platform imports and the suite still runs in two seconds. Retrieval, generation and verification appear as nested spans. |
+| MLflow experiment tracking | **done** | `agent/experiment.py`. Each evaluation run records endpoint and attempts as parameters, the north star plus three supporting metrics, the explanations file as an artifact, and the failing episodes as a tag. |
+| Unity Catalog trace storage | **attempted, not used** | Provisions and binds correctly; nothing exports. See below. |
 | Asset Bundles | **done** | `databricks.yml` plus `resources/iberian_job.yml`, bound to the existing job id so the run history survived. `edit_mode` is `UI_LOCKED`, so the definition is changed in YAML rather than by clicking. |
 | CI | **partial** | Tests, an offline check that every `notebook_path` resolves and every bundle variable is declared, and an install of the app's own requirements in a clean environment. It does not deploy: see the auth note. |
 
@@ -249,6 +251,46 @@ already gone, are the evening demand peak rather than the solar flood. They are
 the same measurement of a different mechanism, and lumping them together would
 overstate how single-caused the pattern is.
 
+## Unity Catalog trace storage, tried and set aside
+
+MLflow's current guidance is that traces on Databricks belong in Unity Catalog
+Delta tables rather than in the experiment's own store. That was configured, and
+it does not work in this workspace. What is recorded here is what was observed,
+because the next person to try it deserves the evidence rather than a shrug.
+
+What worked:
+
+- The experiment bound to `UnityCatalog(catalog_name='bootcamp_students',
+  schema_name='doriel', table_prefix='2122925066106828')`, confirmed by reading
+  `experiment.trace_location` back.
+- MLflow provisioned all four tables, `..._otel_spans`, `_otel_logs`,
+  `_otel_metrics` and `_otel_annotations`, so the schema ownership, the
+  `CREATE TABLE` right and the SQL warehouse were all sufficient.
+- The evaluation ran, three explanations, all grounded, and the run itself was
+  recorded with its parameters, metrics and artifact.
+
+What did not:
+
+- `SELECT count(*)` on the spans table returns 0, after a run made with the
+  warehouse already `RUNNING`.
+- `mlflow.search_traces` returns nothing for that experiment.
+
+**The cause is not established.** The first failure came after a run that had to
+start a stopped warehouse, which made the serverless starter tier's auto-stop the
+obvious suspect. A second run with the warehouse warm exported nothing either, so
+that explanation does not hold and no other has been tested. Naming a cause here
+would be inventing one.
+
+The project therefore uses the experiment's own trace store, which works. Nothing
+depends on the Unity Catalog path: `--trace-catalog` and `--trace-schema` are
+optional flags and the default run does not pass them. The tracing itself is
+unaffected either way, since it is the same spans reaching a different
+destination.
+
+This is a limitation rather than a gap. Runs, parameters, metrics and artifacts,
+which is what the north star metric needs, are recorded and queryable. Spans are
+observability, and losing them costs debugging convenience rather than evidence.
+
 ## The weather result, corrected
 
 The naive correlation between Spanish solar radiation and the Spanish price is
@@ -326,6 +368,10 @@ Things that are known to be unresolved, kept here rather than left implicit.
   none to catch. Its strength against fabrication is demonstrated by its tests
   rather than by use, and that distinction should be made out loud rather than
   left for someone to notice.
+- Unity Catalog trace storage provisions its tables and binds the experiment,
+  and then exports nothing into them. Two runs, one cold warehouse and one warm,
+  both produced zero spans. No cause has been established and none should be
+  claimed until one is.
 - Episode grouping runs under a constant key so the whole series stays in one
   frame. The natural partition is `market_day`, which would split an episode
   running past local midnight in two. At a few thousand rows the constant key
@@ -337,8 +383,10 @@ In priority order. The platform and the delivery path are now the solid parts,
 and the shape of the hourly distribution has been checked, so the remaining risk
 sits in the evidence layer.
 
-1. **MLflow tracing and the Agent Framework wrapper**, so the evaluation runs
-   are recorded as experiments rather than as files in a repository.
+1. **The Agent Framework wrapper.** Tracing and experiment tracking are done;
+   what remains is wrapping the agent as an MLflow `ResponsesAgent` and
+   registering it in Unity Catalog, which is what makes it deployable rather
+   than only observable.
 2. **Vector Search over the notice text**, replacing the direct A78 query. The
    point in time filter has to survive the move, or the evaluation numbers leak
    future information.

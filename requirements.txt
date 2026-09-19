@@ -19,6 +19,16 @@ databricks-sdk>=0.30
 # kind of thing a clean CI environment is for finding.
 PyYAML>=6.0
 
+# Tracing and experiment tracking for the agent. Skinny rather than full
+# MLflow: this project needs the client and the decorator, not a model registry
+# server or a UI. The floor is 3.11.1 because that is where the Unity Catalog
+# trace location API arrives.
+#
+# The code treats it as optional and degrades to a no-op without it. Declaring
+# it anyway means CI exercises the real decorator rather than only the fake one,
+# so a release that breaks the shim fails a build instead of a run.
+mlflow-skinny>=3.11.1
+
 # Tests. A third file for two lines costs more attention than it saves.
 pytest>=7.4
 numpy>=1.26
