@@ -1,10 +1,16 @@
-# The daily run: fetch what is new, then rebuild the tables from it.
+# The daily run: fetch what is new, rebuild the tables, explain what is new in
+# them, and publish the result.
 #
-# Two tasks rather than one, and the split is the same one the code makes. The
-# notebook calls the APIs and lands payloads in the Volume. The declarative
-# pipeline reads the Volume and owns every table. Neither does the other's job,
-# so a rate limited HTTP request never sits inside a unit of work the platform
-# is entitled to retry.
+# Four tasks rather than one, and the splits are the ones the code already
+# makes. The ingest notebook calls the APIs and lands payloads in the Volume.
+# The declarative pipeline reads the Volume and owns every table. The explain
+# task calls a model for the episodes that have no explanation yet. The publish
+# task commits the dashboard data. No task does another's job, so a rate limited
+# HTTP request never sits inside a unit of work the platform is entitled to
+# retry, and a model call never sits inside one either.
+#
+# The three notebooks are numbered in run order, which is why the publish
+# notebook is 03 rather than 02.
 
 resources:
   jobs:
@@ -83,11 +89,35 @@ resources:
             # would reprocess every file since July, every night.
             full_refresh: false
 
-        - task_key: publish
+        - task_key: explain
           depends_on:
             - task_key: transform
           notebook_task:
-            notebook_path: pipelines/02_publish_dashboard
+            notebook_path: pipelines/02_explain_episodes
+            source: GIT
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: ${var.volume}
+              secret_scope: ${var.secret_scope}
+              endpoint: ${var.model_endpoint}
+              # A cap, so the first run after a gap cannot turn into a hundred
+              # model calls inside a task expected to take seconds. The backlog
+              # is printed and picked up the next day.
+              max_new: "25"
+          environment_key: Default
+
+          # Not retried. Each attempt costs model calls, and a partial run has
+          # already written what it produced, so tomorrow's run finishes the
+          # job for free.
+          max_retries: 0
+          timeout_seconds: 1800
+
+        - task_key: publish
+          depends_on:
+            - task_key: explain
+          notebook_task:
+            notebook_path: pipelines/03_publish_dashboard
             source: GIT
             base_parameters:
               catalog: ${var.catalog}
@@ -96,6 +126,7 @@ resources:
               repo: ${var.github_repo}
               branch: ${var.git_branch}
               data_path: app/public/data.json
+              volume: ${var.volume}
           environment_key: Default
 
           # Safe to retry: the write reads the file's current sha first, so a

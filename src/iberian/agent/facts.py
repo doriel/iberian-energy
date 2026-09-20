@@ -40,6 +40,25 @@ class Fact:
     def is_numeric(self) -> bool:
         return isinstance(self.value, (int, float)) and not isinstance(self.value, bool)
 
+    def to_dict(self) -> dict:
+        return {
+            "key": self.key,
+            "value": self.value,
+            "unit": self.unit,
+            "source": self.source,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Fact":
+        return cls(
+            key=str(raw["key"]),
+            value=raw.get("value"),
+            unit=str(raw.get("unit") or ""),
+            source=str(raw.get("source") or ""),
+            note=str(raw.get("note") or ""),
+        )
+
     def render(self) -> str:
         if self.value is None:
             return f"{self.key}: not published"
@@ -66,6 +85,43 @@ class FactSheet:
     market_day: date
     facts: list[Fact] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """A JSON safe form, for crossing a request boundary.
+
+        Timestamps go out as ISO strings rather than epoch numbers. The sheet
+        is the allowlist the verifier checks generated text against, and a
+        number in it is a number the model is permitted to write, so putting
+        1755500700 in there would authorise it to appear in the prose.
+        """
+        return {
+            "subject": self.subject,
+            "start_utc": self.start_utc.isoformat(),
+            "end_utc": self.end_utc.isoformat(),
+            "market_day": self.market_day.isoformat(),
+            "facts": [fact.to_dict() for fact in self.facts],
+            "caveats": list(self.caveats),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "FactSheet":
+        """Rebuild a sheet that arrived over the wire.
+
+        Strict about the four scalars, because a sheet missing its window is a
+        sheet the verifier cannot reason about, and a confusing failure here is
+        better than a confident explanation of the wrong episode.
+        """
+        missing = {"subject", "start_utc", "end_utc", "market_day"} - set(raw)
+        if missing:
+            raise ValueError(f"fact sheet is missing {sorted(missing)}")
+        return cls(
+            subject=str(raw["subject"]),
+            start_utc=datetime.fromisoformat(str(raw["start_utc"])),
+            end_utc=datetime.fromisoformat(str(raw["end_utc"])),
+            market_day=date.fromisoformat(str(raw["market_day"])[:10]),
+            facts=[Fact.from_dict(item) for item in raw.get("facts", [])],
+            caveats=[str(item) for item in raw.get("caveats", [])],
+        )
 
     def numbers(self) -> set[float]:
         """Every numeric value that appeared in a retrieved document.

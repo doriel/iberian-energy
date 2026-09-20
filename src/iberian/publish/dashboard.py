@@ -150,11 +150,28 @@ def load_labels(path: Path) -> dict[str, dict]:
     }
 
 
-def build(source: Source, evaluation: Path | str) -> dict:
+def build(
+    source: Source,
+    evaluation: Path | str,
+    explanations: Path | str | None = None,
+) -> dict:
+    """Assemble the published document.
+
+    `evaluation` holds the human labels, which live in the repository because
+    they are ground truth and a person made them. `explanations` defaults to
+    sitting beside them, which is where the local build writes them, and is
+    passed separately on Databricks because the explain task writes to the
+    Volume: within one Job run the Git checkout is fixed at the commit the run
+    started from, so a file written by one task cannot be read from the
+    checkout by the next.
+    """
     # Coerced rather than required, because the notebook builds this path with
     # os.path.join to match the block it shares with 01_build_medallion, and a
     # TypeError three cells in is a poor way to learn that.
     evaluation = Path(evaluation)
+    explanations = (
+        Path(explanations) if explanations else evaluation / "explanations.jsonl"
+    )
 
     intervals = source.table("gold_interval_premium")
     episodes = source.table("gold_split_episodes")
@@ -172,7 +189,7 @@ def build(source: Source, evaluation: Path | str) -> dict:
     intervals = as_utc(intervals, "ts_utc").sort_values("ts_utc").reset_index(drop=True)
     episodes = as_utc(episodes, "start_utc", "end_utc")
 
-    explanations = load_explanations(evaluation / "explanations.jsonl")
+    explained = load_explanations(explanations)
     labels = load_labels(evaluation / "episodes.csv")
 
     # --- the two validations ---------------------------------------------------
@@ -197,7 +214,7 @@ def build(source: Source, evaluation: Path | str) -> dict:
     for _, row in episodes.sort_values("start_utc", ascending=False).iterrows():
         start = pd.Timestamp(row["start_utc"])
         key = f"{row['market_day']}T{start:%H%M}"
-        explanation = explanations.get(key, {})
+        explanation = explained.get(key, {})
         label = labels.get(key, {})
         episode_rows.append(
             {

@@ -42,6 +42,12 @@ variables:
       commits the dashboard data back to. One branch on purpose: the deployed
       page should be built by the same code that is running.
     default: main
+  model_endpoint:
+    description: >-
+      Foundation Model serving endpoint the agent writes its explanations with.
+      A variable rather than a constant so a model can be compared without
+      editing a notebook.
+    default: databricks-claude-haiku-4-5
   github_repo:
     description: >-
       owner/repo for the publish task's contents API call. Not derived from

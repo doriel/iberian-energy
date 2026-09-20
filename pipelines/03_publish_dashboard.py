@@ -50,6 +50,7 @@ dbutils.widgets.text("secret_scope", "iberian", "Secret scope")
 dbutils.widgets.text("repo", "doriel/iberian-energy", "GitHub owner/repo")
 dbutils.widgets.text("branch", "main", "Branch to commit to")
 dbutils.widgets.text("data_path", "app/public/data.json", "Path in the repo")
+dbutils.widgets.text("volume", "raw", "Volume holding the explanations")
 dbutils.widgets.dropdown("force", "no", ["no", "yes"], "Commit even if unchanged")
 
 CATALOG = dbutils.widgets.get("catalog")
@@ -58,6 +59,7 @@ SCOPE = dbutils.widgets.get("secret_scope")
 REPO = dbutils.widgets.get("repo")
 BRANCH = dbutils.widgets.get("branch")
 DATA_PATH = dbutils.widgets.get("data_path")
+VOLUME = dbutils.widgets.get("volume")
 FORCE = dbutils.widgets.get("force") == "yes"
 
 # COMMAND ----------
@@ -123,7 +125,16 @@ from iberian.publish.github import publish  # noqa: E402
 
 EVALUATION = os.path.join(REPO_ROOT, "evaluation")
 
-payload = build(UnityCatalog(spark, CATALOG, SCHEMA), EVALUATION)
+# The labels stay in the repository: a human made them and they are ground
+# truth. The explanations come from the Volume, because the explain task wrote
+# them minutes ago and this run's Git checkout is frozen at the commit it
+# started from, so a file committed by that task is not visible here.
+EXPLANATIONS = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/agent/explanations.jsonl"
+if not os.path.exists(EXPLANATIONS):
+    print(f"No explanations at {EXPLANATIONS}; the page will show episodes without one.")
+    EXPLANATIONS = None
+
+payload = build(UnityCatalog(spark, CATALOG, SCHEMA), EVALUATION, EXPLANATIONS)
 body = serialise(payload)
 
 print(f"{len(body) / 1024:.0f} KB")

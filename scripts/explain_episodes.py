@@ -23,7 +23,6 @@ read what the agent will be given before spending a token on it.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -31,6 +30,14 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from iberian.agent.batch import (  # noqa: E402
+    episode_key,
+    explain_episodes,
+    load_records,
+    merge,
+    pending,
+    write_records,
+)
 from iberian.agent.experiment import EvaluationRun  # noqa: E402
 from iberian.agent.explain import databricks_completer, explain  # noqa: E402
 from iberian.agent.facts import episode_facts  # noqa: E402
@@ -64,6 +71,11 @@ def main() -> int:
         "--dry-run",
         action="store_true",
         help="print the fact sheets and stop, without calling a model",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="re-explain every episode, including ones already on file",
     )
     parser.add_argument(
         "--experiment",
@@ -111,17 +123,29 @@ def main() -> int:
 
     episodes = episodes.sort_values("max_abs_spread", ascending=False)
     episodes = episodes.assign(
-        episode_key=[
-            f"{row['market_day']}T{pd.Timestamp(row['start_utc']):%H%M}"
-            for _, row in episodes.iterrows()
-        ]
+        episode_key=[episode_key(row) for _, row in episodes.iterrows()]
     )
+
+    # Existing work is read before anything is filtered, because both the
+    # incremental decision and the final merge need it.
+    out_path = Path(args.out)
+    already = load_records(out_path)
 
     if args.labelled_only and not labels.empty:
         known = set(labels.loc[labels["true_cause"].str.strip() != "", "episode_key"])
         episodes = episodes[episodes["episode_key"].isin(known)]
         if episodes.empty:
             print("No labelled episodes yet. Run scripts/label_episodes.py first.")
+            return 0
+
+    if not args.all:
+        before = len(episodes)
+        episodes = pending(episodes, already)
+        skipped = before - len(episodes)
+        if skipped:
+            print(f"{skipped} episode(s) already explained, skipping. --all re-runs them.")
+        if episodes.empty:
+            print("Nothing new to explain.")
             return 0
 
     if args.limit:
@@ -208,11 +232,10 @@ def main() -> int:
     if args.dry_run or not records:
         return 0
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as handle:
-        for record in records:
-            handle.write(json.dumps(record, default=str) + "\n")
+    # Merged, never overwritten. An incremental run produces two or three
+    # records, and writing those alone would delete the other hundred and
+    # twenty-three.
+    write_records(out_path, merge(already, records))
 
     # Recorded after the file is written, so the artifact logged is the one on
     # disk rather than a second serialisation that could differ from it.
