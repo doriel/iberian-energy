@@ -15,9 +15,14 @@ programmatically by `agent.verify`, and it is the number worth arguing about.
     python scripts/explain_episodes.py --limit 5
     python scripts/explain_episodes.py --endpoint databricks-claude-opus-4-5
     python scripts/explain_episodes.py --dry-run
+    python scripts/explain_episodes.py --episode 2026-08-01T1100 --dry-run
 
 `--dry-run` prints the fact sheets without calling a model, which is the way to
 read what the agent will be given before spending a token on it.
+
+`--episode` narrows to one episode, which is what a rejection needs: the sheet
+and the draft side by side decide whether the verifier caught an invention or
+produced another false positive.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from iberian.agent.batch import (  # noqa: E402
     load_records,
     merge,
     pending,
+    to_record,
     write_records,
 )
 from iberian.agent.experiment import EvaluationRun  # noqa: E402
@@ -67,6 +73,15 @@ def main() -> int:
     parser.add_argument("--endpoint", default="databricks-claude-haiku-4-5")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--attempts", type=int, default=2)
+    parser.add_argument(
+        "--episode",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="only this episode, by key (2026-08-01T1100). Repeatable. Naming "
+        "an episode re-runs it even if it is already on file, because that is "
+        "the only reason to name one.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -131,6 +146,15 @@ def main() -> int:
     out_path = Path(args.out)
     already = load_records(out_path)
 
+    if args.episode:
+        wanted = set(args.episode)
+        episodes = episodes[episodes["episode_key"].isin(wanted)]
+        missing = wanted - set(episodes["episode_key"])
+        if missing:
+            print(f"No such episode: {', '.join(sorted(missing))}")
+        if episodes.empty:
+            return 1
+
     if args.labelled_only and not labels.empty:
         known = set(labels.loc[labels["true_cause"].str.strip() != "", "episode_key"])
         episodes = episodes[episodes["episode_key"].isin(known)]
@@ -138,7 +162,7 @@ def main() -> int:
             print("No labelled episodes yet. Run scripts/label_episodes.py first.")
             return 0
 
-    if not args.all:
+    if not args.all and not args.episode:
         before = len(episodes)
         episodes = pending(episodes, already)
         skipped = before - len(episodes)
@@ -209,25 +233,11 @@ def main() -> int:
             if not match.empty:
                 truth = match.iloc[0]["true_cause"].strip()
 
-        records.append(
-            {
-                "episode_key": episode["episode_key"],
-                "model": args.endpoint,
-                "grounded": result.ok,
-                "attempts": result.attempts,
-                "unsupported": [c.text for c in result.verdict.unsupported],
-                "missing_sources": result.verdict.missing_sources,
-                "numeric_claims": len(result.verdict.claims),
-                "text": result.text if result.ok else "",
-                # The draft that failed is the most useful row in the file and
-                # was the one thing not being kept: `text` was blanked and
-                # `rejected` excludes the final attempt. Without it a failure
-                # can only be guessed at from the offending figures.
-                "final_draft": "" if result.ok else result.text,
-                "rejected_drafts": result.rejected,
-                "true_cause": truth,
-            }
-        )
+        # Built by the same function the Job's explain task uses. Writing the
+        # dict here as well is how the two drifted: this copy had no `sources`
+        # key, so a record written locally and a record written on Databricks
+        # were different shapes in the same file.
+        records.append(to_record(episode["episode_key"], result, sheet, truth))
 
     if args.dry_run or not records:
         return 0

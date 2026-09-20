@@ -276,6 +276,43 @@ def test_masking_a_name_does_not_licence_reusing_its_digits():
     assert [claim.value for claim in verdict.unsupported] == [400.0]
 
 
+# --- unit conversions -------------------------------------------------------
+
+
+def durations() -> FactSheet:
+    return sheet(
+        Fact("duration_hours", 0.5, "hours", "derived from A44 prices"),
+        Fact("peak_premium", 0.03, "EUR/MWh", "ENTSO-E A44 day-ahead"),
+    )
+
+
+def test_a_duration_in_hours_may_be_written_in_minutes():
+    """The episode that found this: 0.5 hours written as "the 30-minute window".
+
+    The figure came out of a document and the arithmetic is fixed by the unit.
+    Rejecting it was a verifier defect, not a caught invention.
+    """
+    text = "The 30-minute window showed a 0.03 EUR/MWh premium (ENTSO-E A44)."
+    assert verify(text, durations()).ok
+
+
+def test_a_minute_figure_that_converts_from_nothing_still_fails():
+    text = "The 45-minute window showed a 0.03 EUR/MWh premium (ENTSO-E A44)."
+    verdict = verify(text, durations())
+
+    assert not verdict.ok
+    assert [claim.value for claim in verdict.unsupported] == [45.0]
+
+
+def test_the_conversion_needs_the_unit_to_say_hours():
+    """A bare number carries no licence to multiply it by sixty."""
+    unlabelled = sheet(Fact("duration", 0.5, "", "derived from A44 prices"))
+    verdict = verify("The split lasted 30 minutes (A44).", unlabelled)
+
+    assert not verdict.ok
+    assert [claim.value for claim in verdict.unsupported] == [30.0]
+
+
 def test_small_counting_numbers_do_not_fail_the_check():
     text = "The first of 2 constrained assets was named [ENTSO-E A78]."
     assert verify(text, standard()).ok

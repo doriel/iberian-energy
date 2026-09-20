@@ -19,7 +19,7 @@ through the declarative pipeline end to end.
 | ENTSO-E Transparency | XML API | **done** | A44 prices, A09 schedules, A61 capacity, A78 transmission outages, A80 generation outages. Bronze, silver and gold in the pipeline. |
 | OMIE | Delimited files | **done** | A second, independent publication of the same day-ahead prices. Which column is Portugal is settled by fit rather than assumed. Feeds `gold_price_source_agreement`. |
 | REE / ESIOS | JSON API | **done** | Congestion rent both directions, demand forecast (1775) and actual demand (1293). Feeds `gold_cost_validation`. The demand series are landed and parsed but the forecast error analysis is not written. |
-| Open-Meteo | JSON API | **done** | Hourly radiation, wind and temperature at four locations chosen for their effect on price rather than for population. Feeds `gold_weather_context`. |
+| Open-Meteo | JSON API | **done** | Hourly radiation, wind and temperature at six locations chosen for their effect on price rather than for population. Feeds `gold_weather_context`. |
 | ENTSO-E A78 notices | XML, semi-structured | **partial** | Retrieved directly by the agent with a point in time filter. Not yet a table and not yet a vector index. |
 | REN Datahub | API / files | **not started** | Portuguese generation mix. Open access. |
 | REN / ERSE announcements | Unstructured text | **not started** | The narrative evidence layer. A78 notices partly cover this. |
@@ -36,16 +36,18 @@ through the declarative pipeline end to end.
 | Secrets | **done** | Both API tokens in a scope, set into the environment at the notebook boundary, so the modules keep one authentication path across a laptop and the workspace. |
 | Foundation Model serving | **done** | The agent queries a serving endpoint through the SDK, with the endpoint as an argument so models can be compared. |
 | Incremental ingestion | **done** | Auto Loader reads only unseen files. Republished documents are resolved by publication time. |
-| Scheduled Job | **done** | `iberian-daily`, three tasks, 16:00 Europe/Lisbon. Ingest lands a trailing three day window derived from the run date, transform runs the pipeline, publish commits the dashboard data. |
-| Publishing to the web | **done** | `pipelines/02_publish_dashboard.py` builds the JSON from the gold tables and commits it over the GitHub contents API. Render watches the branch, so the commit is the deploy. Nothing is committed when the data has not changed. |
+| Scheduled Job | **done** | `iberian-daily`, four tasks, 16:00 Europe/Lisbon. Ingest lands a trailing three day window derived from the run date, transform runs the pipeline, explain generates the explanations for episodes that have none, publish commits the dashboard data. |
+| Explanation generation in the Job | **done** | `pipelines/02_explain_episodes.py`. This is what makes the north star's "within fifteen minutes of publication" a property of the system rather than of somebody being at a laptop. Incremental: two or three episodes a day, capped at 25 so the first run after a gap cannot become a hundred model calls. |
+| Agent output as a table | **done** | `gold_episode_explanations`, written by the explain task rather than by the declarative pipeline. A deliberate exception to "the pipeline owns every table": the pipeline runs before the explanations exist, so a pipeline-owned copy would always be a day behind. The JSONL in the Volume stays the record of work and the table is overwritten from it on every run, so the file is always the side that is right. |
+| Publishing to the web | **done** | `pipelines/03_publish_dashboard.py` builds the JSON from the gold tables and commits it over the GitHub contents API. Render watches the branch, so the commit is the deploy. Nothing is committed when the data has not changed. |
 | Web service on Render | **done** | The dashboard is served at `/`, from published data, with no sign in. The Databricks authorization code flow still works end to end at `/auth`. |
 | Lakebase, gold sync, CDF back to Delta | **blocked** | The workspace issues OAuth app integrations rather than service principal secrets. See the auth note below. |
 | Databricks Vector Search | **not started** | For the notice text. Retrieval today is a direct A78 query with the point in time filter in Python. |
-| Mosaic AI Agent Framework | **partial** | The agent exists and runs, as plain Python against a serving endpoint. Wrapping it in the framework, with tracing and a registered model, has not been done. |
+| Mosaic AI Agent Framework | **partial** | `agents/mibel_agent.py` wraps the agent as an MLflow `ResponsesAgent`, the interface Databricks currently recommends. It is not yet registered in Unity Catalog, which needs `CREATE MODEL` on the schema and may hit the same permissions wall as the rest. |
 | MLflow tracing | **done** | `agent/tracing.py` resolves `mlflow.trace` once, or a no-op where MLflow is absent, so the library keeps no platform imports and the suite still runs in two seconds. Retrieval, generation and verification appear as nested spans. |
-| MLflow experiment tracking | **done** | `agent/experiment.py`. Each evaluation run records endpoint and attempts as parameters, the north star plus three supporting metrics, the explanations file as an artifact, and the failing episodes as a tag. |
+| MLflow experiment tracking | **done** | `agent/experiment.py`. Each evaluation run records endpoint and attempts as parameters, the north star plus five supporting metrics, the explanations file as an artifact, and the failing episodes as a tag. |
 | Unity Catalog trace storage | **attempted, not used** | Provisions and binds correctly; nothing exports. See below. |
-| Asset Bundles | **done** | `databricks.yml` plus `resources/iberian_job.yml`, bound to the existing job id so the run history survived. `edit_mode` is `UI_LOCKED`, so the definition is changed in YAML rather than by clicking. |
+| Asset Bundles | **done** | `databricks.yml` plus `resources/iberian_job.yml`, bound to the existing job id so the run history survived. The Job is managed by the bundle, so the definition is changed in YAML rather than by clicking: an edit made in the interface is overwritten by the next deploy. |
 | CI | **partial** | Tests, an offline check that every `notebook_path` resolves and every bundle variable is declared, and an install of the app's own requirements in a clean environment. It does not deploy: see the auth note. |
 
 ### A note on authentication
@@ -169,29 +171,32 @@ Every figure in a generated explanation is checked against the set of values
 that were actually retrieved, and an explanation that fails is not returned.
 Over all 48 labelled episodes:
 
-| Model | Grounded | Notes |
-|---|---|---|
-| `databricks-claude-haiku-4-5` | 48 of 48 | all on the first attempt |
-| `databricks-claude-opus-4-5` | 47 of 48 | one rejection |
+| Model | Grounded | Passed first attempt | Verifier |
+|---|---|---|---|
+| `databricks-claude-haiku-4-5` | 48 of 48 | 45 | current, including the date check |
+| `databricks-claude-opus-4-5` | 47 of 48 | not recorded | pre-dates the date check, not repeated |
 
-Two things in that table are worth more than the percentages.
+**The two rows are not comparable and the table says so on purpose.** The Opus
+run happened before dates were checked at all, and its single rejection is one
+the current verifier would accept. Re-running Opus under the present rules is on
+the list; until it is done, the only defensible claim is the Haiku row.
 
-**The small model is as grounded as the large one.** That is the hypothesis the
-design rests on: if the retrieval and the verification do the work, model size
-should not matter much. Here it did not matter at all.
+**No model has invented a number.** Across roughly a hundred drafts and two
+models, the numeric check has never rejected a figure that turned out to be
+fabricated. Every numeric rejection it has ever produced on live text was a
+defect in the check, five of them, listed below.
 
-**The single rejection is the check doing its job.** Opus wrote "this 45-minute
-episode" for an episode of 0.75 hours. The arithmetic is correct and the prompt
-forbids it, because a model that computes cannot be distinguished from a model
-that computes wrongly without redoing the computation. A reader would have
-accepted that sentence without a second thought.
+**The three retries were all the same error, and it was a real one.** Three
+explanations stated a day that was not the episode's. A reader checking one
+claim would check that one, because a date is the only figure in the sentence
+they can verify without the data. The retry, told which date was wrong and which
+were permitted, corrected all three.
 
-In 96 drafts across two models, neither invented a number.
+#### The verifier's own defect record
 
-#### What that result cost, and why it is worth stating
-
-The first run of the full set reported 42 of 48 and 35 of 48. Every one of those
-rejections was a defect in the verifier, not in the model:
+This is kept in full because the pattern is the finding. The first run of the
+full set reported 42 of 48 and 35 of 48, and every one of those rejections was
+the check being wrong, not the model:
 
 1. Dates written in prose. "Published on 25 June 2026" was read as the numbers
    25 and 2026.
@@ -201,10 +206,27 @@ rejections was a defect in the verifier, not in the model:
    and 400 and 220 were read as invented measurements.
 4. Negative prices written with the typographic minus sign, U+2212, which the
    extractor read as positive.
+5. Unit conversions. A duration retrieved as 0.5 hours, written as "the 30
+   minute window", was rejected. The figure came out of a document and the
+   arithmetic is fixed by the unit, so the check can and now does redo it.
 
-Each is now a test. The lesson is the one worth carrying: writing a verifier
-that never rejects honest text is harder than writing the verifier, and a check
-that cries wolf is worse than no check because it trains you to ignore it.
+Defect 5 is worth singling out, because an earlier version of this document
+presented Opus's "this 45-minute episode" for a 0.75 hour episode as the check
+working correctly, and argued that a model which computes cannot be
+distinguished from one which computes wrongly without redoing the computation.
+That argument was wrong: the verifier can redo a unit conversion exactly and
+cheaply, and it now does. The showcase catch was a sixth false positive.
+
+Fixing defect 1 caused defect 6 by omission. Masking prose dates so they would
+not be read as numbers left the dates themselves entirely unchecked, which is
+how three wrong days reached the output. The date check is the fix, and it is
+the only check here that has ever caught a real error.
+
+Each defect is now a test. Two lessons, and the second is the uncomfortable one.
+Writing a verifier that never rejects honest text is harder than writing the
+verifier, and a check that cries wolf trains you to ignore it. And a check
+narrowed to stop false positives can silently stop checking: the fix to defect 1
+removed a whole class of error from view, and nothing failed to announce it.
 
 ### The hourly concentration, checked rather than assumed
 
@@ -363,11 +385,23 @@ Things that are known to be unresolved, kept here rather than left implicit.
   operator's security assessment. They are related but not the same quantity.
   The fact sheet carries this as a caveat rather than pretending the gap is an
   error to be explained away.
-- The verifier has rejected exactly one live draft, and that draft was true. The
-  check has never caught an actual invention, because in 96 drafts there was
-  none to catch. Its strength against fabrication is demonstrated by its tests
-  rather than by use, and that distinction should be made out loud rather than
-  left for someone to notice.
+- The numeric check has never caught an actual invention, because in roughly a
+  hundred drafts there was none to catch. Every numeric rejection it has
+  produced on live text was its own defect. Its strength against fabrication is
+  demonstrated by its tests rather than by use, and that distinction should be
+  made out loud rather than left for someone to notice. The date check is the
+  exception: it caught three real errors on its first run.
+- Episodes are counted from a spread above 0.01 EUR/MWh, so the labelled set
+  includes events of no economic consequence. `2026-08-01T1100` has a premium of
+  0.03 EUR/MWh on prices of 0.53 and 0.50. The threshold is right as a physical
+  test of decoupling, but the north star speaks of *significant* anomalies, and
+  reporting groundedness over the full set mixes in non-events. Reporting it
+  over `moderate` and `severe` episodes, with the full set as a secondary
+  figure, is the change to consider.
+- `constrained_asset` comes back empty for at least one episode, and the
+  explanation then reads "one unnamed asset". Unclear whether the A78 document
+  carries no name or the parser drops it. For the journalist persona a notice
+  with no asset name is close to worthless.
 - Unity Catalog trace storage provisions its tables and binds the experiment,
   and then exports nothing into them. Two runs, one cold warehouse and one warm,
   both produced zero spans. No cause has been established and none should be
@@ -377,23 +411,51 @@ Things that are known to be unresolved, kept here rather than left implicit.
   running past local midnight in two. At a few thousand rows the constant key
   costs nothing, but the limitation should be understood before changing it.
 
-## Next steps
+## The plan to 2 October
 
-In priority order. The platform and the delivery path are now the solid parts,
-and the shape of the hourly distribution has been checked, so the remaining risk
-sits in the evidence layer.
+Twelve days. The platform and the delivery path are the solid parts and the
+daily loop closes end to end, so the remaining work is evidence and honesty,
+not infrastructure. Ordered by what the presentation cannot go without.
 
-1. **The Agent Framework wrapper.** Tracing and experiment tracking are done;
-   what remains is wrapping the agent as an MLflow `ResponsesAgent` and
-   registering it in Unity Catalog, which is what makes it deployable rather
-   than only observable.
-2. **Vector Search over the notice text**, replacing the direct A78 query. The
-   point in time filter has to survive the move, or the evaluation numbers leak
-   future information.
-3. **Demand forecast error** from the ESIOS series already in silver. This is
-   the missing half of persona 3.
-4. **Resolve the `Pereiros-Rio Maior 1` question**, since it touches the labels.
-5. **A service principal**, if the boot camp administrators will issue one. It
-   unblocks both deploying from CI and the Lakebase read models, and the request
-   is already drafted.
-6. **REN Datahub** for the Portuguese generation mix.
+### Must do
+
+1. ~~`gold_episode_explanations` as a Delta table.~~ **Done.** The explain task
+   now writes the table alongside the JSONL, with a comment on every column.
+2. **Re-run Opus over all 48 under the current verifier**, so the model
+   comparison in this document is a comparison rather than two runs of different
+   things. About 48 model calls.
+3. **Register the `ResponsesAgent` in Unity Catalog.** Needs `CREATE MODEL` on
+   the schema. Timeboxed: if the permission is not there, document it next to
+   the other two permission walls and move on. Do not spend a second day on it.
+4. **Rehearse the presentation with the warehouse already warm.** A cold start
+   in front of an audience reads as the platform being slow.
+
+### Should do, in this order
+
+5. **Report groundedness over `moderate` and `severe` episodes** as the headline
+   figure, with the full set secondary. See the open question above.
+6. **The `constrained_asset` empty name.** One parser question, and it decides
+   whether the journalist persona's evidence names an asset or says "unnamed".
+7. **Resolve the `Pereiros-Rio Maior 1` notice**, since it touches the labels
+   and therefore the metric.
+8. **Demand forecast error** from the ESIOS series already in silver. The
+   missing half of persona 3, and the last table any persona is short of.
+9. **Vector Search over the notice text**, replacing the direct A78 query. The
+   point in time filter has to survive the move or the evaluation numbers leak
+   information from the future. This is the largest remaining item and the one
+   most likely to be cut; it is listed last on purpose.
+
+### Not doing, and why
+
+- **Lakebase read models and CDF back to Delta.** Blocked on a service
+  principal this workspace does not issue. The request is drafted; if it is
+  granted in time it unblocks CI deployment too, but nothing is planned around
+  it arriving.
+- **Unity Catalog trace storage.** Tried, provisions and binds, exports
+  nothing, no cause established. Documented above as a limitation.
+- **~100 hand labelled outage notices.** Only pays for itself if Vector Search
+  lands, and it is behind Vector Search in the queue.
+- **REN Datahub** for the Portuguese generation mix.
+- **A price forecasting model.** Out of scope by an early decision and the
+  decision still holds: it is hard to beat naive baselines and it distracts from
+  the explanation layer, which is the part of this project nobody else has.

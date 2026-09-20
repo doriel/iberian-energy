@@ -298,6 +298,33 @@ def mask_retrieved_strings(text: str, sheet: FactSheet) -> str:
     return text
 
 
+#: Conversions a writer may apply to a retrieved value without inventing
+#: anything, keyed by the unit the sheet declares for it. A duration retrieved
+#: as 0.5 hours is the same duration written as "the 30 minute window", and
+#: rejecting that taught nobody anything: the figure came out of a document and
+#: the arithmetic is fixed by the unit, not chosen by the model.
+#:
+#: The hole is worth naming. Adding 30.0 to the allowlist authorises 30
+#: anywhere in the text, including as "30 MW", because the verifier matches
+#: values and not units. So this table stays as short as FREE_NUMBERS: an entry
+#: is added when a faithful explanation was actually rejected without it, never
+#: because a conversion is imaginable.
+_CONVERSIONS: dict[str, tuple[float, ...]] = {
+    "hours": (60.0,),
+}
+
+
+def allowed_numbers(sheet: FactSheet) -> set[float]:
+    """The retrieved values, plus the conversions their declared units permit."""
+    out = set(sheet.numbers())
+    for fact in sheet.facts:
+        if not fact.is_numeric:
+            continue
+        for factor in _CONVERSIONS.get(fact.unit.strip().lower(), ()):
+            out.add(float(fact.value) * factor)
+    return out
+
+
 def _supports(allowed: float, claim: Claim) -> bool:
     """Is this retrieved value the one the writer meant?"""
     candidates = [allowed]
@@ -327,7 +354,7 @@ def verify(text: str, sheet: FactSheet, require_sources: bool = True) -> Verdict
     grounded even when every figure in it happens to be right.
     """
     claims = extract_claims(mask_retrieved_strings(text, sheet))
-    allowed = sheet.numbers()
+    allowed = allowed_numbers(sheet)
 
     unsupported = [
         claim

@@ -119,9 +119,24 @@ from iberian.parsing.entsoe_outages import (  # noqa: E402
     binding_assets,
     parse_outages_response,
 )
+from iberian.agent.table import (  # noqa: E402
+    column_comments,
+    explanation_rows,
+    explanations_frame,
+    spark_schema,
+    summarise_table,
+)
 from iberian.publish.dashboard import UnityCatalog  # noqa: E402
 
 DIRECTION = (EIC_SPAIN, EIC_PORTUGAL)
+
+#: The agent's output as a table. Written by this task rather than by the
+#: declarative pipeline, and that is a deliberate exception to the rule that
+#: the pipeline owns every table. The pipeline runs before this task, so a
+#: pipeline-owned explanations table would always be a day behind the
+#: explanations, which would quietly break the fifteen minute claim. It is
+#: also not a transformation of landed data: it is this task's own output.
+EXPLANATIONS_TABLE = f"{CATALOG}.{SCHEMA}.gold_episode_explanations"
 
 # COMMAND ----------
 
@@ -156,7 +171,10 @@ if len(todo) > MAX_NEW:
     todo = todo.head(MAX_NEW)
 
 if todo.empty:
-    dbutils.notebook.exit(f"nothing new | {len(already)} explanations on file")
+    # Not an exit. On a quiet day there is nothing to generate and the table
+    # below still has to be written, or a run that adds no episodes would
+    # leave the table missing on the first deploy and stale forever after.
+    print("nothing new to explain")
 
 # COMMAND ----------
 
@@ -168,25 +186,27 @@ if todo.empty:
 
 # COMMAND ----------
 
-client = EntsoeClient(Settings.from_env().require_entsoe_token())
-complete = databricks_completer(endpoint=ENDPOINT)
-build_sheet = sheet_builder(
-    client, intervals, DIRECTION, parse_outages_response, binding_assets
-)
-
 fresh: list[dict] = []
-for record in explain_episodes(
-    todo,
-    build_sheet,
-    complete,
-    model=ENDPOINT,
-    on_each=lambda key, result: print(
-        f"  {key}  {'grounded' if result.ok else 'REJECTED'}  "
-        f"attempt {result.attempts}"
-    ),
-):
-    fresh.append(record)
-    write_records(EXPLANATIONS, merge(already, fresh))
+
+if not todo.empty:
+    client = EntsoeClient(Settings.from_env().require_entsoe_token())
+    complete = databricks_completer(endpoint=ENDPOINT)
+    build_sheet = sheet_builder(
+        client, intervals, DIRECTION, parse_outages_response, binding_assets
+    )
+
+    for record in explain_episodes(
+        todo,
+        build_sheet,
+        complete,
+        model=ENDPOINT,
+        on_each=lambda key, result: print(
+            f"  {key}  {'grounded' if result.ok else 'REJECTED'}  "
+            f"attempt {result.attempts}"
+        ),
+    ):
+        fresh.append(record)
+        write_records(EXPLANATIONS, merge(already, fresh))
 
 # COMMAND ----------
 
@@ -200,6 +220,52 @@ for record in fresh:
     if not record["grounded"]:
         reason = ", ".join(record["unsupported"]) or "no source named"
         print(f"  rejected {record['episode_key']}: {reason}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## The explanations as a table
+# MAGIC
+# MAGIC The JSONL is the record of work: it is what `publish` reads and what the
+# MAGIC evaluation merges into. The table is a materialisation of it, rewritten
+# MAGIC in full on every run, so the two cannot drift. At a few hundred rows an
+# MAGIC overwrite costs nothing, and it means the file is always the side that
+# MAGIC is right.
+# MAGIC
+# MAGIC Without this the agent's output is the only thing in the system that
+# MAGIC cannot be joined to `gold_split_episodes`, queried in SQL, or seen in
+# MAGIC lineage.
+
+# COMMAND ----------
+
+everything = load_records(EXPLANATIONS)
+rows = explanation_rows(everything)
+
+if rows:
+    (
+        spark.createDataFrame(rows, schema=spark_schema())
+        .write.format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(EXPLANATIONS_TABLE)
+    )
+
+    spark.sql(
+        f"COMMENT ON TABLE {EXPLANATIONS_TABLE} IS "
+        "'Agent explanations, one row per market splitting episode. Written by "
+        "the explain task of the iberian-daily Job, not by the declarative "
+        "pipeline. text is empty when grounded is false: an explanation that "
+        "failed verification is never shown to a reader.'"
+    )
+    for column, comment in column_comments().items():
+        escaped = comment.replace("'", "''")
+        spark.sql(
+            f"COMMENT ON COLUMN {EXPLANATIONS_TABLE}.{column} IS '{escaped}'"
+        )
+
+    print(f"{EXPLANATIONS_TABLE}: {summarise_table(explanations_frame(everything))}")
+else:
+    print("No explanations on file, table not written.")
 
 # COMMAND ----------
 

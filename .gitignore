@@ -9,3 +9,8 @@ venv/
 .databricks/
 *:Zone.Identifier
 backfill.log
+# MLflow local tracking. Scratch, not the deliverable.
+mlflow.db
+mlflow.db-journal
+mlruns/
+mlartifacts/

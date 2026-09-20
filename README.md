@@ -48,7 +48,7 @@ src/iberian/
   ingestion/border.py            A09 schedules and A61 capacity, both directions
   ingestion/omie.py              delimited day-ahead files, independent channel
   ingestion/esios.py             REE indicators: congestion rent, demand
-  ingestion/open_meteo.py        hourly weather at four price relevant locations
+  ingestion/open_meteo.py        hourly weather at six price relevant locations
   parsing/entsoe_prices.py       A44 XML -> tidy rows (handles sparse Points)
   parsing/entsoe_outages.py      A78/A80 curves, with point in time filtering
   analysis/market_splitting.py   decoupling detection + episode grouping
@@ -60,18 +60,25 @@ src/iberian/
   agent/facts.py                 retrieved evidence as named, sourced facts
   agent/verify.py                rejects any figure that was not retrieved
   agent/explain.py               generation loop with one corrected retry
+  agent/batch.py                 explain only the episodes that have none yet
+  agent/tracing.py               MLflow spans, or a no-op where MLflow is absent
+  agent/experiment.py            one evaluation run: params, metrics, artifact
+  agent/table.py                 the explanations as a table, typed and commented
   publish/dashboard.py           gold tables -> the published JSON, either source
   publish/github.py              commit a built file over the contents API
+agents/
+  mibel_agent.py                 the agent as an MLflow ResponsesAgent
 pipelines/
   01_build_medallion.py          Databricks ingestion notebook, lands raw only
-  02_publish_dashboard.py        gold -> JSON -> a commit, which Render deploys
+  02_explain_episodes.py         explain what is new, into the Volume
+  03_publish_dashboard.py        gold -> JSON -> a commit, which Render deploys
   transformations/               the Lakeflow declarative pipeline, 18 tables
 app/
   main.py                        FastAPI: the dashboard, and the OAuth flow
   public/index.html              the page itself, no framework, no build step
   public/data.json               published gold data, written by the Job
 databricks.yml                   the Asset Bundle: variables and targets
-resources/iberian_job.yml        the daily Job, three tasks, versioned
+resources/iberian_job.yml        the daily Job, four tasks, versioned
 .github/workflows/ci.yml         tests and configuration checks on every push
 scripts/
   build_medallion.py             local end to end run over a range of market days
@@ -96,7 +103,7 @@ python -m pytest tests/ -q
 python scripts/run_market_splitting.py --demo
 ```
 
-174 tests, under two seconds, no network and no credentials. The demo plants two
+269 tests, under three seconds, no network and no credentials. The demo plants two
 known splits in a synthetic week, so the output is verifiable by eye before real
 data arrives.
 
@@ -131,14 +138,21 @@ directly.
 
 ## How the deployed page stays current
 
-One Job, three tasks, every afternoon at 16:00 Europe/Lisbon.
+One Job, four tasks, every afternoon at 16:00 Europe/Lisbon.
 
 1. `ingest` calls the APIs and lands raw payloads in the Volume. It asks for a
    trailing three day window rather than one day, because ENTSO-E republishes
    corrected documents and landing a day twice is safe.
 2. `transform` runs the declarative pipeline, which owns every table from bronze
    onwards and reads only what Auto Loader has not already seen.
-3. `publish` reads the gold tables, builds the dashboard JSON, and commits it
+3. `explain` generates an explanation for each episode that has none, two or
+   three on a normal day. This is the task that makes the north star's "within
+   fifteen minutes of publication" true of the system rather than of somebody
+   being at a laptop. It writes to the Volume rather than to the repository,
+   because within one run the Git checkout is frozen at the commit the run
+   started from, so a file committed by this task would be invisible to the
+   next one.
+4. `publish` reads the gold tables, builds the dashboard JSON, and commits it
    over the GitHub contents API. Render watches the branch, so the commit is the
    deploy.
 
@@ -195,20 +209,27 @@ full.
 
 **Explanations, against the retrieved evidence.** Every figure the agent writes
 is matched against the set of values that were retrieved, and an explanation
-that fails is never returned. Over all 48 labelled episodes:
-`databricks-claude-haiku-4-5` produced 48 grounded explanations out of 48, and
-`databricks-claude-opus-4-5` 47 out of 48. The single rejection is the larger
-model converting 0.75 hours into "45 minutes", which is arithmetic the prompt
-forbids and the check exists to catch.
+that fails is never returned, and the dates it writes are checked against the
+evidence too. Over all 48 labelled episodes, `databricks-claude-haiku-4-5`
+produced 48 grounded explanations out of 48, 45 of them on the first attempt.
+The three retries were all the same error: a day that was not the episode's,
+which the retry corrected once it was told which date was wrong.
 
-The honest reading of that is in [ROADMAP.md](ROADMAP.md): in 96 drafts neither
-model invented a number, and the small model is as grounded as the large one.
+The honest reading of that is in [ROADMAP.md](ROADMAP.md), and it is less
+flattering than the percentage. No model has invented a number in roughly a
+hundred drafts, so the numeric check has never caught a real fabrication, and
+every numeric rejection it has produced on live text was a defect in the check
+itself. The date check is the one that has caught something real. The
+`databricks-claude-opus-4-5` comparison run pre-dates the date check and has not
+been repeated, so it is not comparable and is not quoted here.
 
 ## What is not here yet
 
 - Databricks Vector Search over the notice text. Retrieval today is a direct
   A78 query with the point in time filter applied in Python.
-- MLflow tracing and the Mosaic AI Agent Framework wrapper around the agent.
+- The agent registered in Unity Catalog. It is wrapped as an MLflow
+  `ResponsesAgent` in `agents/mibel_agent.py`, which is the interface Databricks
+  currently recommends, but registering it needs `CREATE MODEL` on the schema.
 - Deploying from CI. The tests and the configuration checks run on every push,
   but personal access tokens are disabled in this workspace and no service
   principal is available, so CI cannot authenticate to Databricks.

@@ -49,13 +49,19 @@ src/iberian/
     explain.py                     the generate, check, retry once loop
     tracing.py                     MLflow's decorator, or a no-op without it
     experiment.py                  an evaluation run, as an MLflow run
+    batch.py                       which episodes need explaining, and merging
+    table.py                       the explanations as a typed, commented table
   publish/
     dashboard.py                   gold tables to the published JSON
     github.py                      commit a built file over the contents API
 
+agents/
+  mibel_agent.py                   the agent as an MLflow ResponsesAgent
+
 pipelines/
   01_build_medallion.py            ingest task: APIs to the Volume
-  02_publish_dashboard.py          publish task: gold to a commit
+  02_explain_episodes.py           explain task: new episodes to the Volume
+  03_publish_dashboard.py          publish task: gold to a commit
   transformations/                 the declarative pipeline, 18 tables
 
 app/
@@ -130,7 +136,7 @@ export $(grep -v '^#' .env | xargs)
 ### Start here
 
 ```bash
-python -m pytest tests/ -q          # 174 tests, no network, under two seconds
+python -m pytest tests/ -q          # 269 tests, no network, under three seconds
 python scripts/run_market_splitting.py --demo   # whole pipeline, synthetic data
 python scripts/explore.py tables    # what the last run produced
 ```
@@ -299,10 +305,11 @@ says so rather than blaming the user.
 
 ## On Databricks
 
-Three pieces, in this order: a notebook that fetches and lands, a pipeline that
-transforms, and a notebook that publishes. The first writes no tables, the
-second makes no HTTP requests, and the third writes neither tables nor payloads.
-None of those is an accident.
+Four pieces, in this order: a notebook that fetches and lands, a pipeline that
+transforms, a notebook that explains, and a notebook that publishes. The first
+writes no tables, the second makes no HTTP requests, the third calls a model and
+writes neither tables nor payloads, and the fourth makes one authenticated HTTP
+request and nothing else. None of those is an accident.
 
 A declarative pipeline is given data and asked to derive tables from it. Putting
 a rate limited API call inside a unit of work the platform is entitled to retry
@@ -362,7 +369,7 @@ secret_scope  iberian
 ```
 
 It fetches ENTSO-E prices for both zones, the cross-border schedules and
-capacity in both directions, the OMIE files, Open-Meteo for four locations and
+capacity in both directions, the OMIE files, Open-Meteo for six locations and
 four ESIOS indicators, and lands every payload in the Volume. Landing the same
 window twice is safe.
 
@@ -373,7 +380,30 @@ mistake before a cluster spends minutes on it. Then **Run pipeline**.
 Auto Loader reads only the files it has not seen, so a daily run costs seconds.
 Gold is recomputed in full, which at a few thousand rows also costs seconds.
 
-**3. Publishing.** Open `pipelines/02_publish_dashboard.py` and **Run all**. It
+**3. Explanations.** Open `pipelines/02_explain_episodes.py` and **Run all**. It
+reads `gold_split_episodes`, works out which episodes have no explanation on
+file, and calls the serving endpoint for those. Worst first, so if the cap bites
+the explained ones are the ones anybody would have looked at first. Set the
+`rebuild` widget to `yes` only to re-explain everything, which costs one model
+call per episode.
+
+It then writes `gold_episode_explanations`, overwritten in full from the JSONL
+on every run. The file is the record of work and the table is a materialisation
+of it, so if the two ever disagree the file is right. Every column carries a
+comment, because a gold table a journalist or a grader is expected to query
+should explain itself:
+
+```sql
+SELECT e.market_day, e.peak_spread, x.text
+FROM   bootcamp_students.doriel.gold_split_episodes  e
+JOIN   bootcamp_students.doriel.gold_episode_explanations x
+  ON   x.episode_key = concat(e.market_day, 'T', date_format(e.start_utc, 'HHmm'))
+WHERE  x.grounded
+ORDER  BY e.peak_spread DESC
+LIMIT  10;
+```
+
+**4. Publishing.** Open `pipelines/03_publish_dashboard.py` and **Run all**. It
 reads the gold tables, builds the same JSON the local export builds, and commits
 it to the branch. Render watches the branch, so the commit is the deploy.
 
@@ -486,9 +516,18 @@ which matters because the Job commits every afternoon.
 
 ## The daily Job
 
-`iberian-daily` runs the three tasks in order at 16:00 Europe/Lisbon, which
-leaves margin after the Iberian day-ahead results are published in the early
-afternoon.
+`iberian-daily` runs four tasks in order at 16:00 Europe/Lisbon, which leaves
+margin after the Iberian day-ahead results are published in the early
+afternoon: `ingest`, `transform`, `explain`, `publish`.
+
+`explain` is the one that is easy to miss and the one that makes the north star
+metric a property of the system. It explains only episodes with no explanation
+on file, capped at 25 per run, and writes to
+`/Volumes/<catalog>/<schema>/<volume>/agent/explanations.jsonl`. It writes there
+rather than to the repository because within a single run the Git checkout is
+frozen at the commit the run started from, so a file this task committed would
+be invisible to `publish` in the same run. The Volume is where the tasks of this
+Job already hand things to each other.
 
 The definition lives in `resources/iberian_job.yml` and is deployed with the
 Asset Bundle. It was originally built by clicking, which is fine for finding out
@@ -501,7 +540,9 @@ databricks bundle deploy -t prod
 databricks bundle run iberian_daily -t prod
 ```
 
-`edit_mode` is now `UI_LOCKED`: change the Job in the YAML, not in the interface.
+Change the Job in the YAML, not in the interface. A bundle deployed Job is
+marked as managed by the bundle and the workspace restricts editing it there;
+either way an edit made by clicking is overwritten by the next deploy.
 
 ### What deploy does and does not do
 
@@ -568,6 +609,24 @@ Every evaluation run records itself. Nothing here is required to get the
 numbers: without MLflow installed the run says so and carries on, which is why
 `iberian/agent/tracing.py` exists at all.
 
+### Recording locally needs the full MLflow, not the skinny one
+
+`requirements.txt` pins `mlflow-skinny`, which is right for the Job: the
+notebook environment wants the small package and the project only needs tracing
+and logging there. Locally it is not enough. From MLflow 3.7 the default local
+backend is SQLite rather than `./mlruns`, and the skinny package ships without
+SQLAlchemy, so the database stores are never registered and a local run fails
+with `unsupported URI 'sqlite:///.../mlflow.db'`. Install the full package in
+the development environment and leave `requirements.txt` alone:
+
+```bash
+pip install mlflow                 # the full package, brings SQLAlchemy
+```
+
+This is a development dependency. Nothing in the Job needs it, and adding it to
+`requirements.txt` would put a package into the Job environment for the sake of
+a laptop.
+
 ```bash
 # Local, recorded nowhere
 python scripts/explain_episodes.py --limit 3 --labelled-only --no-mlflow
@@ -577,7 +636,8 @@ python scripts/explain_episodes.py --limit 3 --labelled-only \
   --tracking-uri databricks
 ```
 
-The run carries the endpoint and the attempt limit as parameters, four metrics,
+The run carries the endpoint, the attempt limit and the trace storage as
+parameters, six metrics,
 `evaluation/explanations.jsonl` as an artifact, and the failing episode keys as
 a tag.
 
@@ -671,11 +731,23 @@ python scripts/explain_episodes.py --limit 5
 # Only episodes a human has labelled, which is what the metric needs
 python scripts/explain_episodes.py --labelled-only
 
+# One episode, by key. Re-runs it even though it is already on file, because
+# that is the only reason to name one. This is how a rejection gets diagnosed.
+python scripts/explain_episodes.py --episode 2026-08-01T1100
+python scripts/explain_episodes.py --episode 2026-08-01T1100 --dry-run
+
 # A larger model, to test whether grounding or model size does the work
 python scripts/explain_episodes.py --labelled-only \
   --endpoint databricks-claude-opus-4-5 \
   --out evaluation/explanations_opus.jsonl
 ```
+
+By default only episodes with no explanation on file are run, because an
+episode's evidence is fixed once its market day settles and re-explaining the
+other hundred and twenty-three would spend model calls reproducing answers that
+already exist. `--all` re-runs everything. Records are merged by episode key,
+never overwritten wholesale: an early version of this script overwrote the file
+and a `--limit 3` test run silently destroyed 45 explanations.
 
 Output lands in `evaluation/explanations.jsonl`, one record per episode, with
 the rejected drafts and the final failing draft kept. The rejections are the

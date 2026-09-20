@@ -91,6 +91,9 @@ def to_record(key: str, result, sheet: FactSheet, truth: str = "") -> dict:
         "attempts": result.attempts,
         "unsupported": [claim.text for claim in result.verdict.unsupported],
         "missing_sources": result.verdict.missing_sources,
+        # Kept for the same reason as the rejected draft: a date rejection that
+        # leaves no trace can only be reconstructed by re-running the episode.
+        "wrong_dates": [claim.text for claim in result.verdict.wrong_dates],
         "numeric_claims": len(result.verdict.claims),
         "text": result.text if result.ok else "",
         # The draft that failed is the most useful row in the file: without it a
