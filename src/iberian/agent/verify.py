@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from iberian.agent.facts import FactSheet
 from iberian.agent.tracing import SpanType, trace
@@ -79,6 +80,16 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class DateClaim:
+    """A date as it appeared in the text, resolved enough to compare."""
+
+    text: str
+    year: int
+    month: int
+    day: int | None = None
+
+
+@dataclass(frozen=True)
 class Verdict:
     """The outcome, and enough detail to show a reader what failed."""
 
@@ -86,12 +97,52 @@ class Verdict:
     claims: list[Claim] = field(default_factory=list)
     unsupported: list[Claim] = field(default_factory=list)
     missing_sources: bool = False
+    wrong_dates: list["DateClaim"] = field(default_factory=list)
 
     def describe(self) -> str:
         if self.ok:
             return f"{len(self.claims)} numeric claim(s), all retrieved."
-        bad = ", ".join(claim.text for claim in self.unsupported)
-        return f"Unsupported: {bad}"
+        parts = []
+        if self.unsupported:
+            parts.append(
+                "Unsupported: " + ", ".join(claim.text for claim in self.unsupported)
+            )
+        if self.wrong_dates:
+            parts.append(
+                "Dates not in the evidence: "
+                + ", ".join(claim.text for claim in self.wrong_dates)
+            )
+        if self.missing_sources:
+            parts.append("No source named.")
+        return "  ".join(parts) or "Rejected."
+
+
+#: The same shapes as _DATELIKE, but with the parts named so a date can be
+#: resolved rather than only skipped. Masking dates stopped the verifier
+#: reading "25 June 2026" as the numbers 25 and 2026, which was right, and left
+#: this class of error completely unguarded: three explanations in a run of
+#: forty-five stated a day that was not the episode's. A reader checking one
+#: figure would check that one, because it is the only claim in the sentence
+#: they can verify without the data.
+_ISO_DATE = re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})\b")
+_DAY_MONTH = re.compile(
+    rf"\b(?P<day>\d{{1,2}})\s+(?P<month>{_MONTHS})(?:\s+(?P<year>\d{{4}}))?\b"
+)
+_MONTH_DAY = re.compile(
+    rf"\b(?P<month>{_MONTHS})\s+(?P<day>\d{{1,2}})(?!\d)(?:,\s*(?P<year>\d{{4}}))?\b"
+)
+_MONTH_YEAR = re.compile(rf"\b(?P<month>{_MONTHS})\s+(?P<year>\d{{4}})\b")
+
+_MONTH_NUMBERS = {
+    name: number
+    for number, name in enumerate(
+        (
+            "January", "February", "March", "April", "May", "June", "July",
+            "August", "September", "October", "November", "December",
+        ),
+        start=1,
+    )
+}
 
 
 #: A model writing a negative price often reaches for the typographic minus
@@ -123,6 +174,100 @@ def extract_claims(text: str) -> list[Claim]:
             )
         )
     return claims
+
+
+def extract_dates(text: str, year_hint: int | None = None) -> list["DateClaim"]:
+    """Every date a reader would take as the date of something.
+
+    A month and year without a day resolves to the month, because "June 2026"
+    asserts less than "25 June 2026" and failing it for being vague would be
+    wrong. A day and month without a year takes the year from the episode,
+    which is what a reader does.
+    """
+    found: list[DateClaim] = []
+    seen: set[tuple[int, int, int]] = set()
+
+    def record(raw: str, year, month, day) -> None:
+        if year is None:
+            if year_hint is None:
+                return
+            year = year_hint
+        key = (int(year), int(month), int(day or 0))
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(
+            DateClaim(text=raw.strip(), year=int(year), month=int(month),
+                      day=int(day) if day else None)
+        )
+
+    # Specific shapes first, and each match is blanked before the next pattern
+    # runs. "2 September 2026" contains "September 2026", and counting it twice
+    # would report one mistake as two and make the retry message wrong.
+    remaining = text
+    for pattern, has_day in (
+        (_ISO_DATE, True),
+        (_DAY_MONTH, True),
+        (_MONTH_DAY, True),
+        (_MONTH_YEAR, False),
+    ):
+        for match in list(pattern.finditer(remaining)):
+            month = match["month"]
+            record(
+                match.group(0),
+                match["year"],
+                int(month) if month.isdigit() else _MONTH_NUMBERS[month],
+                match["day"] if has_day else None,
+            )
+        remaining = pattern.sub(lambda m: " " * len(m.group(0)), remaining)
+    return found
+
+
+def allowed_dates(sheet: FactSheet) -> set[tuple[int, int, int]]:
+    """Dates the sheet actually contains, as (year, month, day) triples.
+
+    Three sources: the market day, the window the episode spans, and any date
+    written into a retrieved fact. The third is what lets a model quote a
+    notice's publication date, which it is required to do.
+
+    The window is expanded day by day rather than taking only its ends. An
+    episode running past midnight legitimately touches both, and the Iberian
+    market day begins at local midnight, so the market day and the UTC date of
+    the start are often different and both are honest to write.
+    """
+    out: set[tuple[int, int, int]] = set()
+
+    def add(value) -> None:
+        out.add((value.year, value.month, value.day))
+
+    add(sheet.market_day)
+    current = sheet.start_utc.date()
+    last = sheet.end_utc.date()
+    while current <= last:
+        add(current)
+        current += timedelta(days=1)
+
+    for fact in sheet.facts:
+        for candidate in (fact.value, fact.note):
+            if isinstance(candidate, str):
+                for match in _ISO_DATE.finditer(candidate):
+                    out.add((int(match["year"]), int(match["month"]), int(match["day"])))
+    return out
+
+
+def unsupported_dates(text: str, sheet: FactSheet) -> list["DateClaim"]:
+    """Dates in the text that are in no retrieved fact and no part of the window."""
+    allowed = allowed_dates(sheet)
+    months = {(year, month) for year, month, _ in allowed}
+
+    bad = []
+    for claim in extract_dates(text, year_hint=sheet.market_day.year):
+        if claim.day is None:
+            if (claim.year, claim.month) not in months:
+                bad.append(claim)
+        elif (claim.year, claim.month, claim.day) not in allowed:
+            bad.append(claim)
+    return bad
 
 
 def mask_retrieved_strings(text: str, sheet: FactSheet) -> str:
@@ -191,6 +336,13 @@ def verify(text: str, sheet: FactSheet, require_sources: bool = True) -> Verdict
         and not any(_supports(value, claim) for value in allowed)
     ]
 
+    # Dates are checked rather than skipped. The numeric extractor masks them
+    # so that 25 and 2026 are not read as measurements, which is right, and
+    # leaves the date itself unchecked, which is not: a sentence opening "the
+    # market split on 2 September" about an episode on the third is wrong in
+    # the one way a reader can catch unaided.
+    wrong_dates = unsupported_dates(text, sheet)
+
     missing_sources = False
     if require_sources and claims:
         # Only sources that carry an identifier can be cited at all. "derived
@@ -202,10 +354,11 @@ def verify(text: str, sheet: FactSheet, require_sources: bool = True) -> Verdict
         )
 
     return Verdict(
-        ok=not unsupported and not missing_sources,
+        ok=not unsupported and not missing_sources and not wrong_dates,
         claims=claims,
         unsupported=unsupported,
         missing_sources=missing_sources,
+        wrong_dates=wrong_dates,
     )
 
 

@@ -106,24 +106,143 @@ def test_dates_and_times_are_not_treated_as_measurements():
 
 
 def test_a_date_written_out_in_prose_is_not_a_measurement():
-    """"published on 25 June 2026" cost us 19 rejections of faithful text."""
+    """"published on 25 June 2026" cost us 19 rejections of faithful text.
+
+    The date must not be read as the numbers 25 and 2026. It must still be
+    checked as a date, which is a separate question, so this asserts only that
+    the numeric check leaves it alone.
+    """
+    facts = sheet(
+        Fact("peak_premium", 109.84, "EUR/MWh", "ENTSO-E A44 day-ahead"),
+        Fact("notice_published", "2026-06-25", "", "ENTSO-E A78"),
+    )
     text = (
         "The notice was published on 25 June 2026 and the premium reached "
         "109.84 EUR/MWh [ENTSO-E A44]."
     )
-    assert verify(text, standard()).ok
+    verdict = verify(text, facts)
+    assert verdict.ok
+    assert all(claim.value != 2026 for claim in verdict.claims)
 
 
-def test_every_prose_date_shape_the_models_actually_wrote():
+def test_every_prose_date_shape_is_read_as_a_date():
+    """The shapes the models actually write, each one in the evidence.
+
+    Previously this asserted that any prose date passed, which is what let
+    three explanations in a run of forty-five state the wrong day. The shapes
+    still have to be recognised; what changed is that recognising one now
+    means checking it.
+    """
     for written in (
-        "on 2 September 2026",
-        "on 28 August",
-        "published June 25, 2026",
+        "on 18 August 2026",
+        "on 18 August",
+        "published August 18, 2026",
         "during August 2026",
-        "from 09:30Z to 09:45Z on 18 July 2026",
+        "from 09:30Z to 09:45Z on 18 August 2026",
     ):
         text = f"The premium was 109.84 EUR/MWh [ENTSO-E A44], {written}."
         assert verify(text, standard()).ok, written
+
+
+# --- dates, which are claims too --------------------------------------------
+
+
+def test_the_wrong_day_is_rejected():
+    """The bug this check exists for.
+
+    Three explanations out of forty-five opened with a date that was not the
+    episode's. Every figure in them was retrieved, so the numeric check passed
+    them, and the one assertion a reader could verify unaided was false.
+    """
+    text = (
+        "The market split on 2 September 2026 with a premium of 109.84 "
+        "EUR/MWh [ENTSO-E A44]."
+    )
+    verdict = verify(text, standard())
+    assert not verdict.ok
+    assert [claim.text for claim in verdict.wrong_dates] == ["2 September 2026"]
+
+
+def test_the_wrong_day_in_iso_is_rejected_too():
+    text = "On 2026-09-03 the premium reached 109.84 EUR/MWh [ENTSO-E A44]."
+    assert not verify(text, standard()).ok
+
+
+def test_the_market_day_passes():
+    text = "On 2026-08-18 the premium reached 109.84 EUR/MWh [ENTSO-E A44]."
+    assert verify(text, standard()).ok
+
+
+def test_a_retrieved_publication_date_passes():
+    # The agent is required to say when a notice was published, so the date in
+    # a fact has to be quotable.
+    facts = sheet(
+        Fact("peak_premium", 109.84, "EUR/MWh", "ENTSO-E A44 day-ahead"),
+        Fact("notice_published", "2026-07-23", "", "ENTSO-E A78"),
+    )
+    text = (
+        "A notice published on 2026-07-23 was in force while the premium "
+        "reached 109.84 EUR/MWh [ENTSO-E A44, ENTSO-E A78]."
+    )
+    assert verify(text, facts).ok
+
+
+def test_a_publication_date_that_was_not_retrieved_is_rejected():
+    facts = sheet(
+        Fact("peak_premium", 109.84, "EUR/MWh", "ENTSO-E A44 day-ahead"),
+        Fact("notice_published", "2026-07-23", "", "ENTSO-E A78"),
+    )
+    text = (
+        "A notice published on 2026-07-19 was in force while the premium "
+        "reached 109.84 EUR/MWh [ENTSO-E A44, ENTSO-E A78]."
+    )
+    assert not verify(text, facts).ok
+
+
+def test_a_month_without_a_day_is_checked_at_month_precision():
+    # "during August 2026" asserts less than a day does, and failing it for
+    # being vague would be wrong. A different month is still wrong.
+    ok = "The premium reached 109.84 EUR/MWh during August 2026 [ENTSO-E A44]."
+    bad = "The premium reached 109.84 EUR/MWh during July 2026 [ENTSO-E A44]."
+    assert verify(ok, standard()).ok
+    assert not verify(bad, standard()).ok
+
+
+def test_a_day_and_month_with_no_year_takes_the_episode_year():
+    assert verify(
+        "The split happened on 18 August with a premium of 109.84 EUR/MWh "
+        "[ENTSO-E A44].",
+        standard(),
+    ).ok
+    assert not verify(
+        "The split happened on 19 August with a premium of 109.84 EUR/MWh "
+        "[ENTSO-E A44].",
+        standard(),
+    ).ok
+
+
+def test_an_episode_spanning_midnight_may_name_either_day():
+    """The market day begins at local midnight, so the two differ honestly."""
+    overnight = FactSheet(
+        subject="overnight episode",
+        start_utc=datetime(2026, 9, 3, 22, 15, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 9, 4, 1, 0, tzinfo=timezone.utc),
+        market_day=date(2026, 9, 4),
+        facts=[Fact("peak_premium", 109.84, "EUR/MWh", "ENTSO-E A44 day-ahead")],
+    )
+    for day in ("2026-09-03", "2026-09-04"):
+        text = f"On {day} the premium reached 109.84 EUR/MWh [ENTSO-E A44]."
+        assert verify(text, overnight).ok, day
+
+
+def test_the_verdict_says_which_date_was_wrong():
+    text = (
+        "The market split on 2 September 2026 with a premium of 109.84 "
+        "EUR/MWh [ENTSO-E A44]."
+    )
+    described = verify(text, standard()).describe()
+    assert "2 September 2026" in described
+    assert "Dates not in the evidence" in described
 
 
 def test_digits_inside_a_retrieved_asset_name_are_not_claims():

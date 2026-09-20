@@ -63,6 +63,13 @@ Your previous answer was rejected because it named no source. Every figure \
 must be attributed to the document it came from.\
 """
 
+DATE_SUFFIX = """\
+
+Your previous answer was rejected because it stated {count} date(s) that do \
+not appear in the facts: {offending}. The window and every publication date \
+are in the list you were given. Use those exactly, or write no date at all.\
+"""
+
 EMPTY_SUFFIX = """\
 
 Your previous answer was empty. Write the explanation.\
@@ -118,6 +125,11 @@ def explain(
                 system += RETRY_SUFFIX.format(
                     count=len(verdict.unsupported),
                     offending=", ".join(claim.text for claim in verdict.unsupported),
+                )
+            elif verdict.wrong_dates:
+                system += DATE_SUFFIX.format(
+                    count=len(verdict.wrong_dates),
+                    offending=", ".join(claim.text for claim in verdict.wrong_dates),
                 )
             elif verdict.missing_sources:
                 system += SOURCE_SUFFIX
