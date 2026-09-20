@@ -157,7 +157,14 @@ if episodes.empty:
 episodes = episodes.sort_values("max_abs_spread", ascending=False)
 
 os.makedirs(os.path.dirname(EXPLANATIONS), exist_ok=True)
-already = [] if REBUILD else load_records(EXPLANATIONS)
+
+# What is on file is always read, including on a rebuild. Blanking it here and
+# relying on the rebuild to replace everything looks equivalent and is not: the
+# cap below can leave a rebuild partway through, and the merge would then write
+# only the episodes this run reached and silently delete the rest. `merge` puts
+# the fresh records last, so a re-explained episode wins on its key without
+# anything else being touched.
+already = load_records(EXPLANATIONS)
 todo = episodes if REBUILD else pending(episodes, already)
 
 print(f"{len(episodes)} episodes, {len(already)} explained, {len(todo)} pending")
@@ -168,6 +175,11 @@ if len(todo) > MAX_NEW:
     # The rest are picked up tomorrow, and the count is printed so a backlog is
     # visible rather than silent.
     print(f"capping at {MAX_NEW}; {len(todo) - MAX_NEW} will wait for the next run")
+    if REBUILD:
+        # A rebuild always starts from the worst episode, so the ones beyond
+        # the cap are not picked up by a second rebuild: it would redo the
+        # same head. Raise max_new to cover the whole set in one pass.
+        print(f"  a capped rebuild does not resume. Set max_new above {len(episodes)}.")
     todo = todo.head(MAX_NEW)
 
 if todo.empty:
