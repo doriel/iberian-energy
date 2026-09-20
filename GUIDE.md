@@ -427,6 +427,85 @@ token works and never on a schedule.
 | Silver | `silver_entsoe_prices`, `silver_entsoe_schedules`, `silver_entsoe_capacity`, `silver_omie_prices`, `silver_weather`, `silver_esios_indicators` |
 | Gold | `gold_interval_premium`, `gold_daily_profile`, `gold_split_episodes`, `gold_weather_context`, `gold_price_source_agreement`, `gold_cost_validation` |
 
+Plus `gold_episode_explanations`, which is written by the `explain` task rather
+than by the pipeline, for the reason given in that notebook.
+
+```mermaid
+flowchart LR
+    subgraph bronze["Bronze: the payload as it arrived"]
+        direction TB
+        B1["bronze_entsoe_prices"]
+        B2["bronze_entsoe_schedules"]
+        B3["bronze_entsoe_capacity"]
+        B4["bronze_omie"]
+        B5["bronze_open_meteo"]
+        B6["bronze_esios"]
+    end
+
+    subgraph silver["Silver: parsed, one table per source, no business logic"]
+        direction TB
+        S1["silver_entsoe_prices"]
+        S2["silver_entsoe_schedules"]
+        S3["silver_entsoe_capacity"]
+        S4["silver_omie_prices"]
+        S5["silver_weather"]
+        S6["silver_esios_indicators"]
+    end
+
+    subgraph gold["Gold: every table serves a persona or checks a number"]
+        direction TB
+        G1["gold_interval_premium<br/>persona 1 and 3"]
+        G2["gold_daily_profile<br/>persona 1"]
+        G3["gold_split_episodes<br/>persona 2"]
+        G4["gold_weather_context<br/>persona 2 and 3"]
+        G5["gold_price_source_agreement<br/>checked against OMIE"]
+        G6["gold_cost_validation<br/>checked against REE"]
+    end
+
+    GX["gold_episode_explanations<br/>persona 2, written by the explain task"]
+
+    B1 --> S1
+    B2 --> S2
+    B3 --> S3
+    B4 --> S4
+    B5 --> S5
+    B6 --> S6
+
+    S1 --> G1
+    S2 --> G1
+    S3 --> G1
+    S1 --> G2
+    S2 --> G2
+    S3 --> G2
+    S1 --> G3
+    S2 --> G3
+    S3 --> G3
+    G1 --> G4
+    S5 --> G4
+    S1 --> G5
+    S4 --> G5
+    G3 --> G6
+    S6 --> G6
+    G3 --> GX
+```
+
+Three things the picture makes obvious that the table above does not.
+
+**Bronze to silver is one to one.** Every source gets its own silver table and
+no business logic happens on that hop, so a parsing bug is fixed by replaying
+bronze rather than by re-fetching from a rate limited API.
+
+**The first three gold views are siblings, not a chain.** `gold_interval_premium`,
+`gold_daily_profile` and `gold_split_episodes` each read the same three silver
+tables and compute all three results internally, returning one. That is what
+keeps the interval premium, the daily profile and the episode boundaries
+arithmetically consistent with each other.
+
+**The two validations sit in gold on purpose.** `gold_price_source_agreement`
+and `gold_cost_validation` are checks against publishers outside this project,
+and they are tables recomputed on every run rather than scripts somebody
+remembers to invoke.
+
 ### Checking it agrees with the local build
 
 This is the check worth running after any change to the analysis, because it is

@@ -15,6 +15,103 @@ in prose where every figure is traceable to a published document.
 - [ROADMAP.md](ROADMAP.md) is what is built, what is not, and what the numbers
   have been checked against.
 
+## How it fits together
+
+Four publishers, one Databricks Job, and a static page. Nothing the three
+target users touch requires an account anywhere.
+
+```mermaid
+flowchart LR
+    subgraph publishers["Publishers, four shapes of data"]
+        direction TB
+        E["ENTSO-E Transparency<br/>XML: A44 A09 A61 A78"]
+        O["OMIE<br/>delimited files"]
+        R["REE / ESIOS<br/>JSON"]
+        W["Open-Meteo<br/>JSON"]
+    end
+
+    subgraph job["Databricks: one Job, 16:00 Europe/Lisbon, four tasks"]
+        direction TB
+        I["1 ingest<br/>lands raw bytes, writes no tables"]
+        RAW[("Volume<br/>raw landing zone")]
+        T["2 transform<br/>Lakeflow declarative pipeline"]
+        TBL[("18 Delta tables<br/>bronze to gold")]
+        X["3 explain<br/>one model call per new episode"]
+        JSONL[("Volume<br/>explanations.jsonl")]
+        GX[("gold_episode_explanations<br/>written by the task, not the pipeline")]
+        P["4 publish<br/>builds the dashboard JSON"]
+    end
+
+    FM["Foundation Model endpoint<br/>fact sheet in, prose out"]
+
+    subgraph outside["Outside the workspace"]
+        direction TB
+        GH["GitHub<br/>commit to app/public/data.json"]
+        RND["Render<br/>FastAPI serving a static page"]
+        USR["Manufacturer, journalist, grid analyst<br/>none has a Databricks account"]
+    end
+
+    E --> I
+    O --> I
+    R --> I
+    W --> I
+    I --> RAW
+    RAW --> T
+    T --> TBL
+    TBL --> X
+    X <--> FM
+    X --> JSONL
+    X --> GX
+    TBL --> P
+    JSONL --> P
+    P -->|"contents API, one authenticated request"| GH
+    GH -->|"Render watches the branch"| RND
+    RND --> USR
+```
+
+Two things in that picture are decisions rather than plumbing.
+
+**The Job writes to GitHub rather than to a server.** A Databricks Job has no
+git checkout and no ssh key, but it can make one authenticated HTTP request.
+The contents API means one trigger and one credential, and Render watching the
+branch means the commit is the deploy. If the data has not changed, nothing is
+committed and nothing rebuilds.
+
+**The explanations cross between tasks through the Volume, not the repository.**
+Within one run the Git checkout is frozen at the commit the run started from, so
+a file `explain` committed would be invisible to `publish` in the same run.
+
+### The explanation layer
+
+This is the part of the project that is not a dashboard. The model is handed
+retrieved facts and nothing else, and what it writes is checked before anyone
+reads it.
+
+```mermaid
+flowchart TB
+    EP["One episode from<br/>gold_split_episodes"]
+    RET["Retrieve: the episode's intervals,<br/>plus A78 notices published<br/>BEFORE the episode began"]
+    SHEET["Fact sheet<br/>every value carries its document.<br/>This is the only thing the model sees"]
+    GEN["Foundation Model<br/>phrases the facts"]
+    VER{"Verify<br/>every number retrieved?<br/>every date in the evidence?<br/>a document named?"}
+    RETRY["Retry once, told exactly<br/>which claim failed"]
+    OK["Published<br/>text, sources, attempts"]
+    NO["Rejected<br/>text stays empty,<br/>the draft is kept for diagnosis"]
+
+    EP --> RET --> SHEET --> GEN --> VER
+    VER -->|"pass"| OK
+    VER -->|"fail, first attempt"| RETRY --> GEN
+    VER -->|"fail, second attempt"| NO
+    OK --> OUT[("gold_episode_explanations<br/>and explanations.jsonl")]
+    NO --> OUT
+```
+
+The guarantee is enforced after generation rather than requested in the prompt,
+because a prompt is a request and this is meant to be a guarantee. Every figure
+in the prose must match a value that came out of a document, every date must be
+one the evidence supports, and at least one source must be named. An
+explanation that fails is not softened, it is not shown.
+
 ## Why the code is shaped this way
 
 The ingestion, parsing, analysis and agent modules are plain Python with no
