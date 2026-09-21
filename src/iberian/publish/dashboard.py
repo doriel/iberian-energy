@@ -353,8 +353,12 @@ def summarise(payload: dict) -> list[str]:
             f"worst difference {head['worst_price_difference']}"
         )
     if "cost_difference_pct" in head:
+        # Both sides labelled. The first version gave REE's figure a name and
+        # ours none, and it was read the wrong way round: as this project
+        # counting more than the operator, when it counts slightly less.
         lines.append(
-            f"REE congestion rent: {head['ree_rent_eur']:,.0f} EUR against "
-            f"{head['total_cost_eur']:,.0f}, {head['cost_difference_pct']}%"
+            f"Extra import cost {head['total_cost_eur']:,.0f} EUR vs REE "
+            f"congestion rent {head['ree_rent_eur']:,.0f} EUR "
+            f"({head['cost_difference_pct']}%)"
         )
     return lines

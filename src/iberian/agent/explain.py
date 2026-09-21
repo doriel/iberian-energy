@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from iberian.agent.facts import FactSheet
+from iberian.agent.facts import FactSheet, written_date
 from iberian.agent.tracing import SpanType, trace
 from iberian.agent.verify import Verdict, verify
 
@@ -66,8 +66,9 @@ must be attributed to the document it came from.\
 DATE_SUFFIX = """\
 
 Your previous answer was rejected because it stated {count} date(s) that do \
-not appear in the facts: {offending}. The window and every publication date \
-are in the list you were given. Use those exactly, or write no date at all.\
+not appear in the facts: {offending}. The market day is {market_day}. The \
+window and every publication date are in the list you were given. Use those \
+exactly, or write no date at all.\
 """
 
 EMPTY_SUFFIX = """\
@@ -130,6 +131,9 @@ def explain(
                 system += DATE_SUFFIX.format(
                     count=len(verdict.wrong_dates),
                     offending=", ".join(claim.text for claim in verdict.wrong_dates),
+                    # Naming only the wrong date left the model to find the right
+                    # one, and one retry repeated the same wrong day.
+                    market_day=written_date(sheet.market_day),
                 )
             elif verdict.missing_sources:
                 system += SOURCE_SUFFIX

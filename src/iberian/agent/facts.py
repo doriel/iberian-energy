@@ -150,7 +150,7 @@ class FactSheet:
         lines = [
             f"Subject: {self.subject}",
             f"Window: {self.start_utc:%Y-%m-%d %H:%M}Z to {self.end_utc:%Y-%m-%d %H:%M}Z",
-            f"Market day: {self.market_day}",
+            f"Market day: {self.market_day}, written {written_date(self.market_day)}",
             "",
             "Retrieved facts:",
         ]
@@ -159,6 +159,22 @@ class FactSheet:
             lines += ["", "Caveats that must not be omitted:"]
             lines += [f"  - {caveat}" for caveat in self.caveats]
         return "\n".join(lines)
+
+
+def written_date(day: date) -> str:
+    """"1 August 2026", the form an explanation actually uses.
+
+    Given only 2026-08-01, the small model converted it to prose itself and got
+    the day wrong, "2 August 2026", on three different episodes and in both
+    runs. Handing it the written form removes the conversion rather than
+    checking it afterwards. English month names on purpose: the explanations
+    are written in English and the verifier matches English month names.
+    """
+    months = (
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December",
+    )
+    return f"{day.day} {months[day.month - 1]} {day.year}"
 
 
 def _number(value) -> float | None:
@@ -232,9 +248,15 @@ def episode_facts(
         if "price_es_eur_mwh" in worst:
             add("price_es_at_peak", worst["price_es_eur_mwh"], "EUR/MWh",
                 "ENTSO-E A44 day-ahead", moment)
+        # The direction is in the key and the note, as it already was for the
+        # flow. Without it a model wrote "fully saturated at 5,445 MW in both
+        # directions": the figure was retrieved, so the verifier passed it, and
+        # the qualifier was invented. A61 is published per direction and this
+        # is only the Spain to Portugal one.
         if pd.notna(worst.get("capacity_mw")):
-            add("border_capacity_at_peak", worst["capacity_mw"], "MW",
-                "ENTSO-E A61 day-ahead capacity", moment)
+            add("border_capacity_es_to_pt_at_peak", worst["capacity_mw"], "MW",
+                "ENTSO-E A61 day-ahead capacity",
+                f"{moment}, Spain to Portugal direction only")
         if pd.notna(worst.get("net_flow_mw")):
             add("net_flow_es_to_pt_at_peak", worst["net_flow_mw"], "MW",
                 "ENTSO-E A09 scheduled exchanges", moment)
@@ -242,7 +264,8 @@ def episode_facts(
         capacity = intervals["capacity_mw"].dropna() if "capacity_mw" in intervals else None
         if capacity is not None and not capacity.empty:
             add("lowest_border_capacity", capacity.min(), "MW",
-                "ENTSO-E A61 day-ahead capacity", "lowest across the episode")
+                "ENTSO-E A61 day-ahead capacity",
+                "lowest across the episode, Spain to Portugal direction only")
 
     if pd.notna(episode.get("share_saturated")):
         share = float(episode["share_saturated"])
@@ -257,18 +280,42 @@ def episode_facts(
 
     if assets:
         tightest = assets[0]
-        add("constrained_asset", tightest.get("asset"),
+
+        # Some A78 notices arrive with no asset at all: no registered resource,
+        # no name, no mRID. The parser falls back to a placeholder label, and a
+        # model handed that placeholder writes "an unnamed asset", which reads
+        # as though this project lost the name. The truth is that the operator
+        # published a capacity restriction without saying where, and for the
+        # journalist persona that is a finding rather than a gap to paper over.
+        named = tightest.get("asset_named", True)
+        add("constrained_asset", tightest.get("asset") if named else None,
             source="ENTSO-E A78 transmission unavailability")
+        if not named:
+            caveats.append(
+                "The most restrictive notice does not identify the asset: the "
+                "operator published it with no asset name or identifier. Say "
+                "that the publisher did not name the asset. Do not call it "
+                "unnamed as if the name were missing here, and do not guess one."
+            )
         add("constrained_asset_available", tightest.get("available_mw"), "MW",
             "ENTSO-E A78 transmission unavailability")
         add("constrained_asset_status", tightest.get("status"),
             source="ENTSO-E A78 transmission unavailability")
         add("notices_in_force", len(assets), "notices",
-            "ENTSO-E A78, published before the episode began")
+            "ENTSO-E A78, published before the episode began",
+            "a count only: these notices were published on different dates")
+
+        # Named for the one notice it belongs to. As `notice_published`, beside
+        # a count of every notice in force, models wrote "nine notices were in
+        # force, published on 13 August", attaching one notice's date to all
+        # nine. The date is in the sheet, so the verifier passed it: it checks
+        # values, not what a value is attached to. The fix has to be here.
         published = tightest.get("published_at")
         if published is not None:
-            add("notice_published", f"{published:%Y-%m-%d}",
-                source="ENTSO-E A78 publication timestamp")
+            add("constrained_asset_notice_published", f"{published:%Y-%m-%d}",
+                source="ENTSO-E A78 publication timestamp",
+                note="the publication date of the most restrictive notice only, "
+                "not of every notice in force")
 
         capacity_fact = next(
             (f for f in facts if f.key == "lowest_border_capacity"), None

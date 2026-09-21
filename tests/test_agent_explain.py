@@ -147,3 +147,35 @@ def test_the_model_name_is_carried_through_for_the_evaluation_record():
     result = explain(sheet(), Stub(HONEST), model="databricks-claude-haiku-4-5")
     assert result.model == "databricks-claude-haiku-4-5"
     assert "databricks-claude-haiku-4-5" in result.render()
+
+
+# --- the day, written the way the model writes it ---------------------------
+
+
+def test_the_sheet_offers_the_market_day_in_prose():
+    # Given only 2026-08-01, the small model wrote "2 August 2026" three times.
+    from iberian.agent.facts import written_date
+
+    assert written_date(date(2026, 8, 1)) == "1 August 2026"
+    assert "written 18 August 2026" in sheet().render()
+
+
+def test_the_written_market_day_passes_the_date_check():
+    text = (
+        "On 18 August 2026 Portugal paid up to 109.84 EUR/MWh more than Spain "
+        "[ENTSO-E A44 day-ahead]."
+    )
+    assert explain(sheet(), Stub(text)).ok
+
+
+def test_the_date_retry_names_the_right_day_not_only_the_wrong_one():
+    wrong = (
+        "On 2 August 2026 Portugal paid up to 109.84 EUR/MWh more than Spain "
+        "[ENTSO-E A44 day-ahead]."
+    )
+    stub = Stub(wrong, HONEST)
+    result = explain(sheet(), stub)
+
+    assert result.ok
+    assert "2 August 2026" in stub.systems[1]
+    assert "The market day is 18 August 2026" in stub.systems[1]

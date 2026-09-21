@@ -200,7 +200,7 @@ python -m pytest tests/ -q
 python scripts/run_market_splitting.py --demo
 ```
 
-269 tests, under three seconds, no network and no credentials. The demo plants two
+282 tests, under five seconds, no network and no credentials. The demo plants two
 known splits in a synthetic week, so the output is verifiable by eye before real
 data arrives.
 
@@ -316,9 +316,10 @@ The honest reading of that is in [ROADMAP.md](ROADMAP.md), and it is less
 flattering than the percentage. No model has invented a number in roughly a
 hundred drafts, so the numeric check has never caught a real fabrication, and
 every numeric rejection it has produced on live text was a defect in the check
-itself. The date check is the one that has caught something real. The
-`databricks-claude-opus-4-5` comparison run pre-dates the date check and has not
-been repeated, so it is not comparable and is not quoted here.
+itself. The date check is the one that has caught something real. Under the
+same rules `databricks-claude-opus-4-5` also reaches 48 of 48, all on the first
+attempt: the larger model never makes the date slip, the retry catches it for
+the smaller one, and what reaches a reader is the same.
 
 ## What is not here yet
 

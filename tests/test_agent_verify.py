@@ -425,7 +425,7 @@ def test_facts_from_one_interval_come_from_the_same_interval():
 
     price_pt = facts.get("price_pt_at_peak").value
     price_es = facts.get("price_es_at_peak").value
-    capacity = facts.get("border_capacity_at_peak").value
+    capacity = facts.get("border_capacity_es_to_pt_at_peak").value
     flow = facts.get("net_flow_es_to_pt_at_peak").value
 
     # All four come from the second interval, the worst one.
@@ -468,6 +468,80 @@ def test_a_missing_notice_becomes_a_caveat_rather_than_silence():
 
     assert facts.get("notices_in_force").value == 0
     assert any("unexplained" in caveat.lower() for caveat in facts.caveats)
+
+
+def notice(**overrides) -> dict:
+    row = {
+        "asset": "Alcochete-Palmela",
+        "asset_named": True,
+        "available_mw": 2800.0,
+        "status": "planned",
+        "published_at": datetime(2026, 7, 23, tzinfo=timezone.utc),
+    }
+    row.update(overrides)
+    return row
+
+
+def test_a_notice_published_without_an_asset_is_said_to_be_unidentified():
+    """The A78 notice of 2026-07-17 carries no asset block at all.
+
+    The placeholder label must not reach the model as though it were a name,
+    and the model must be told the publisher did not name it.
+    """
+    facts = episode_facts(
+        build_episode(),
+        build_intervals(),
+        assets=[notice(asset="unnamed asset", asset_named=False)],
+    )
+    assert facts.get("constrained_asset").value is None
+    assert "not published" in facts.render()
+    assert "unnamed asset" not in facts.render()
+    assert any("did not name the asset" in caveat for caveat in facts.caveats)
+
+
+def test_a_named_asset_is_passed_through_unchanged():
+    facts = episode_facts(build_episode(), build_intervals(), assets=[notice()])
+    assert facts.get("constrained_asset").value == "Alcochete-Palmela"
+    assert not any("did not name" in caveat for caveat in facts.caveats)
+
+
+def test_the_publication_date_is_tied_to_one_notice_not_the_count():
+    """Models wrote "nine notices were in force, published on 13 August".
+
+    One notice's date was sitting beside the count of all of them. The key and
+    the note now say which notice the date belongs to.
+    """
+    facts = episode_facts(
+        build_episode(),
+        build_intervals(),
+        assets=[notice(), notice(asset="Pereiros-Rio Maior 1", available_mw=3600.0)],
+    )
+    assert facts.get("notice_published") is None, "the ambiguous key is gone"
+    dated = facts.get("constrained_asset_notice_published")
+    assert dated.value == "2026-07-23"
+    assert "not of every notice" in dated.note
+    assert "different dates" in facts.get("notices_in_force").note
+
+
+def test_the_border_capacity_says_which_direction_it_is():
+    """A model wrote "fully saturated at 5,445 MW in both directions".
+
+    The figure is the Spain to Portugal capacity only. The number passed the
+    verifier, the qualifier was invented, so the sheet has to state it.
+    """
+    facts = episode_facts(build_episode(), build_intervals(), assets=None)
+    for key in ("border_capacity_es_to_pt_at_peak", "lowest_border_capacity"):
+        assert "Spain to Portugal direction only" in facts.get(key).note, key
+
+
+def test_the_renamed_date_still_licenses_the_date_in_prose():
+    # Renaming the key must not make the verifier reject the date it names.
+    facts = episode_facts(build_episode(), build_intervals(), assets=[notice()])
+    text = (
+        "A planned outage on Alcochete-Palmela, published on 23 July 2026, "
+        "limited it to 2,800 MW (ENTSO-E A78)."
+    )
+    assert verify(text, facts).ok
 
 
 def test_a_notice_that_does_not_account_for_the_drop_is_flagged():

@@ -217,6 +217,10 @@ def binding_assets(
         rows.append(
             {
                 "asset": curve.label,
+                # False when the notice carries no asset block at all, so the
+                # label above is only the placeholder. The fact sheet needs to
+                # know the difference to describe it honestly.
+                "asset_named": bool(curve.asset_name or curve.asset_mrid),
                 "location": curve.asset_location,
                 "status": curve.status,
                 "business_type": curve.business_type,
