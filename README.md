@@ -166,6 +166,7 @@ src/iberian/
 agents/
   mibel_agent.py                 the agent as an MLflow ResponsesAgent
 pipelines/
+  00_setup_notice_index.py       one-off: the notice table and its vector index
   01_build_medallion.py          Databricks ingestion notebook, lands raw only
   02_explain_episodes.py         explain what is new, into the Volume
   03_publish_dashboard.py        gold -> JSON -> a commit, which Render deploys

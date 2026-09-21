@@ -16,11 +16,11 @@ through the declarative pipeline end to end.
 
 | Source | Shape | Status | Notes |
 |---|---|---|---|
-| ENTSO-E Transparency | XML API | **done** | A44 prices, A09 schedules, A61 capacity, A78 transmission outages, A80 generation outages. Bronze, silver and gold in the pipeline. |
+| ENTSO-E Transparency | XML API | **done** | A44 prices, A09 schedules and A61 capacity, with bronze, silver and gold in the pipeline. A78 transmission notices are not landed: they are fetched at explanation time, see the next row. A80 generation outages are parsed but not used. An earlier version of this table said all five were in the pipeline, which was not true. |
 | OMIE | Delimited files | **done** | A second, independent publication of the same day-ahead prices. Which column is Portugal is settled by fit rather than assumed. Feeds `gold_price_source_agreement`. |
 | REE / ESIOS | JSON API | **done** | Congestion rent both directions, demand forecast (1775) and actual demand (1293). Feeds `gold_cost_validation`. The demand series are landed and parsed but the forecast error analysis is not written. |
 | Open-Meteo | JSON API | **done** | Hourly radiation, wind and temperature at six locations chosen for their effect on price rather than for population. Feeds `gold_weather_context`. |
-| ENTSO-E A78 notices | XML, semi-structured | **partial** | Retrieved directly by the agent with a point in time filter. Not yet a table and not yet a vector index. |
+| ENTSO-E A78 notices | XML, semi-structured | **partial** | Retrieved directly by the agent with a point in time filter. `gold_transmission_notices` and its vector index exist, created by `pipelines/00_setup_notice_index.py`, and hold a placeholder until the loading task is written. |
 | REN Datahub | API / files | **not started** | Portuguese generation mix. Open access. |
 | REN / ERSE announcements | Unstructured text | **not started** | The narrative evidence layer. A78 notices partly cover this. |
 
@@ -42,7 +42,7 @@ through the declarative pipeline end to end.
 | Publishing to the web | **done** | `pipelines/03_publish_dashboard.py` builds the JSON from the gold tables and commits it over the GitHub contents API. Render watches the branch, so the commit is the deploy. Nothing is committed when the data has not changed. |
 | Web service on Render | **done** | The dashboard is served at `/`, from published data, with no sign in. The Databricks authorization code flow still works end to end at `/auth`. |
 | Lakebase, gold sync, CDF back to Delta | **blocked** | The workspace issues OAuth app integrations rather than service principal secrets. See the auth note below. |
-| Databricks Vector Search | **not started** | For the notice text. Retrieval today is a direct A78 query with the point in time filter in Python. |
+| Databricks Vector Search | **partial** | Index `gold_transmission_notices_index` on the shared endpoint, Delta Sync with managed `databricks-gte-large-en` embeddings, created early to hold a slot on an endpoint that had been full. A smoke test confirmed the point in time filter: with it, only notices published before the episode are returned; without it, a notice published after the episode was the top result. Loading the real notices and switching retrieval over are still to do. |
 | Mosaic AI Agent Framework | **done, not deployed** | `agents/mibel_agent.py` is an MLflow `ResponsesAgent`, the interface Databricks currently recommends, registered in Unity Catalog as `bootcamp_students.doriel.mibel_agent` by `scripts/register_agent.py`. The library is packaged with it, and that is checked rather than assumed: the registered version is loaded in a separate process outside the repository, and `iberian` has to import from the model's own `code/` directory. Serving it behind an endpoint was left out on purpose; the daily Job calls the same code directly, and an endpoint would add a running cost for no user. |
 | MLflow tracing | **done** | `agent/tracing.py` resolves `mlflow.trace` once, or a no-op where MLflow is absent, so the library keeps no platform imports and the suite still runs in two seconds. Retrieval, generation and verification appear as nested spans. |
 | MLflow experiment tracking | **done** | `agent/experiment.py`. Each evaluation run records endpoint and attempts as parameters, the north star plus five supporting metrics, the explanations file as an artifact, and the failing episodes as a tag. |
