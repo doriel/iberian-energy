@@ -136,7 +136,7 @@ export $(grep -v '^#' .env | xargs)
 ### Start here
 
 ```bash
-python -m pytest tests/ -q          # 282 tests, no network, under five seconds
+python -m pytest tests/ -q          # 286 tests, no network, under five seconds
 python scripts/run_market_splitting.py --demo   # whole pipeline, synthetic data
 python scripts/explore.py tables    # what the last run produced
 ```

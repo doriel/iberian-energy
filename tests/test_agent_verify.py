@@ -534,6 +534,38 @@ def test_the_border_capacity_says_which_direction_it_is():
         assert "Spain to Portugal direction only" in facts.get(key).note, key
 
 
+def test_the_cost_says_who_pays_it():
+    """A model wrote "the premium cost Spanish importers", which is backwards."""
+    facts = episode_facts(build_episode(), build_intervals(), assets=None)
+    note = facts.get("extra_import_cost").note
+    assert "paid on the Portuguese side" in note
+    assert "national demand" in note, "the older safeguard is kept"
+
+
+def test_the_cost_note_does_not_blame_portugal_when_spain_is_dearer():
+    facts = episode_facts(
+        build_episode(premium_side="ES"), build_intervals(), assets=None
+    )
+    assert "Portuguese side" not in facts.get("extra_import_cost").note
+
+
+def test_saturation_says_which_direction_filled():
+    facts = episode_facts(build_episode(), build_intervals(), assets=None)
+    assert "Spain to Portugal" in facts.get("share_of_intervals_saturated").note
+
+
+def test_the_asset_figure_says_it_is_what_remains_available():
+    """A model wrote "2,800 MW of transmission capacity was unavailable".
+
+    The value is what stays available during the outage. The source is called
+    "unavailability", and that was enough to invert it.
+    """
+    facts = episode_facts(build_episode(), build_intervals(), assets=[notice()])
+    note = facts.get("constrained_asset_available").note
+    assert "REMAINS AVAILABLE" in note
+    assert "not the amount taken out of service" in note
+
+
 def test_the_renamed_date_still_licenses_the_date_in_prose():
     # Renaming the key must not make the verifier reject the date it names.
     facts = episode_facts(build_episode(), build_intervals(), assets=[notice()])

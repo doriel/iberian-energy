@@ -228,7 +228,20 @@ def episode_facts(
             episode.get("extra_cost_eur"),
             "EUR",
             "A44 prices with A09 scheduled flows",
-            "premium applied to energy actually imported, not to national demand",
+            # Who pays is stated, not left to be inferred. Without it a model
+            # wrote "the premium cost Spanish importers", which is backwards.
+            # The figure is the spread times the Spain to Portugal flow, so it
+            # is Portugal's cost whenever Portugal is the dearer side. When
+            # Spain is, that flow is near zero and so is the figure, and the
+            # note says only what was computed.
+            (
+                "paid on the Portuguese side, on energy imported from Spain "
+                "into Portugal at the higher Portuguese price; applied to that "
+                "imported energy only, not to national demand"
+                if episode.get("premium_side") == "PT"
+                else "the spread applied to energy flowing from Spain into "
+                "Portugal only, not to national demand"
+            ),
         )
 
     # Everything below comes from one interval, the worst one, rather than
@@ -270,7 +283,9 @@ def episode_facts(
     if pd.notna(episode.get("share_saturated")):
         share = float(episode["share_saturated"])
         add("share_of_intervals_saturated", share, "",
-            "A09 flow against A61 capacity")
+            "A09 flow against A61 capacity",
+            "share of the episode's intervals in which the Spain to Portugal "
+            "flow filled the Spain to Portugal capacity")
         if share >= 0.5:
             caveats.append(
                 "The border being full is consistent with the price separation. "
@@ -297,8 +312,14 @@ def episode_facts(
                 "that the publisher did not name the asset. Do not call it "
                 "unnamed as if the name were missing here, and do not guess one."
             )
+        # The document type is "unavailability" and the value is what stays
+        # available, and the two side by side were read the wrong way round:
+        # "2,800 MW of transmission capacity was unavailable". The note says
+        # which it is in words that cannot be inverted.
         add("constrained_asset_available", tightest.get("available_mw"), "MW",
-            "ENTSO-E A78 transmission unavailability")
+            "ENTSO-E A78 transmission unavailability",
+            "the capacity that REMAINS AVAILABLE on this asset during the "
+            "outage, not the amount taken out of service")
         add("constrained_asset_status", tightest.get("status"),
             source="ENTSO-E A78 transmission unavailability")
         add("notices_in_force", len(assets), "notices",

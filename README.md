@@ -200,7 +200,7 @@ python -m pytest tests/ -q
 python scripts/run_market_splitting.py --demo
 ```
 
-282 tests, under five seconds, no network and no credentials. The demo plants two
+286 tests, under five seconds, no network and no credentials. The demo plants two
 known splits in a synthetic week, so the output is verifiable by eye before real
 data arrives.
 
