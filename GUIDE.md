@@ -836,6 +836,37 @@ flawless or the check is weak, and that needs settling rather than assuming.
 `--dry-run` still performs retrieval. Only the model call is skipped. A preview
 that showed different facts from the real run would be worse than no preview.
 
+### Registering the agent in Unity Catalog
+
+```bash
+pip install boto3
+python scripts/register_agent.py
+```
+
+`boto3` is needed once, locally. Unity Catalog stores model versions in the
+workspace's cloud storage, S3 here, and the upload needs `boto3`, which plain
+`mlflow` does not bring. The error message suggests `mlflow[databricks]`, but
+that extra also pulls `databricks-agents`, whose dependency `whenever` has no
+wheel for Python 3.14 and fails to build without a Rust compiler, taking the
+whole install down with it. `boto3` alone is what is missing. The script checks
+for it before doing anything, so a missing package costs nothing. It stays out
+of `requirements.txt` because nothing in the Job needs it.
+
+This logs `agents/mibel_agent.py` as a models-from-code `ResponsesAgent`, with
+`src/iberian/` packaged beside it, and registers it as
+`bootcamp_students.doriel.mibel_agent`. The input example is a real fact sheet
+for the worst episode, and MLflow calls the model on it while logging, so
+registering costs one model call.
+
+It then loads the registered version in a separate process, from a directory
+outside the repository, and prints where `iberian` was imported from. A path
+ending in `code/iberian/` means the model carries its own code. Checking this in
+the same process would prove nothing, because that process has already
+imported the repository copy.
+
+Registering is not deploying. Serving the model behind an endpoint is a
+separate step and is not attempted.
+
 ### Reading the failures
 
 ```bash

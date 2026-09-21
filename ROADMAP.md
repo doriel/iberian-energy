@@ -1,989 +1,470 @@
-# How to run this
+# Roadmap
 
-Two environments, and the same code in both. Locally the medallion is parquet
-on disk, on Databricks it is Delta in Unity Catalog built by a Lakeflow
-declarative pipeline. The ingestion, parsing and analysis functions are the
-same objects in both cases, which is what makes the numbers comparable.
+What is built, what is not, and what the numbers have been checked against.
 
-Start here for the local loop, which is where development happens, then
-[Databricks](#on-databricks) for the platform.
+Status keys: **done**, **partial**, **not started**.
 
-- [Where everything lives](#where-everything-lives)
-- [The mental model](#the-mental-model)
-- [Locally](#locally)
-- [The dashboard](#the-dashboard)
-- [On Databricks](#on-databricks)
-- [The daily Job](#the-daily-job)
-- [Continuous integration](#continuous-integration)
-- [Tracing and experiments](#tracing-and-experiments)
-- [The evaluation set](#the-evaluation-set)
-- [Running the agent](#running-the-agent)
-- [Things worth breaking on purpose](#things-worth-breaking-on-purpose)
-- [Changing the analysis](#changing-the-analysis)
+See [README.md](README.md) for what the project is and [GUIDE.md](GUIDE.md) for
+how to run it.
 
-## Where everything lives
+## Data sources
 
-Four places, and which one a file belongs in is decided by what it is allowed to
-import rather than by what it is about.
+The platform combines structured market data with an unstructured evidence
+layer, and the sources deliberately differ in shape (XML, JSON, delimited
+files, free text), not just in hostname. All four structured sources now flow
+through the declarative pipeline end to end.
 
-| Folder | What it is | May import |
+| Source | Shape | Status | Notes |
+|---|---|---|---|
+| ENTSO-E Transparency | XML API | **done** | A44 prices, A09 schedules, A61 capacity, A78 transmission outages, A80 generation outages. Bronze, silver and gold in the pipeline. |
+| OMIE | Delimited files | **done** | A second, independent publication of the same day-ahead prices. Which column is Portugal is settled by fit rather than assumed. Feeds `gold_price_source_agreement`. |
+| REE / ESIOS | JSON API | **done** | Congestion rent both directions, demand forecast (1775) and actual demand (1293). Feeds `gold_cost_validation`. The demand series are landed and parsed but the forecast error analysis is not written. |
+| Open-Meteo | JSON API | **done** | Hourly radiation, wind and temperature at six locations chosen for their effect on price rather than for population. Feeds `gold_weather_context`. |
+| ENTSO-E A78 notices | XML, semi-structured | **partial** | Retrieved directly by the agent with a point in time filter. Not yet a table and not yet a vector index. |
+| REN Datahub | API / files | **not started** | Portuguese generation mix. Open access. |
+| REN / ERSE announcements | Unstructured text | **not started** | The narrative evidence layer. A78 notices partly cover this. |
+
+## Platform and architecture
+
+| Component | Status | Notes |
 |---|---|---|
-| `src/iberian/` | the library | standard library, pandas, requests. No Databricks, no Spark |
-| `pipelines/` | notebooks and the declarative pipeline | `src/iberian/`, plus Spark and dbutils |
-| `scripts/` | entry points you run at a terminal | `src/iberian/` |
-| `app/` | the web service | nothing from `src/iberian/`: it serves a built file |
+| Medallion bronze / silver / gold | **done** | 18 tables. Runs locally as parquet and on Databricks as Delta from the same modules. |
+| Lakeflow declarative pipelines | **done** | `pipelines/transformations/`. Bronze and silver are streaming tables over the Volume with Auto Loader, gold is materialized views. The pipeline file contains no transformation of its own. |
+| Raw landing zone | **done** | A Unity Catalog Volume, with the same directory layout as the local `data/raw/`, which is what let sixty market days be copied up and read without translation. |
+| Delta and Unity Catalog | **done** | The pipeline owns every table from bronze onwards. The ingestion notebook writes none. |
+| Databricks Git folder | **done** | Notebook and pipeline both import `src/iberian/`, so the logic stays covered by the test suite. |
+| Secrets | **done** | Both API tokens in a scope, set into the environment at the notebook boundary, so the modules keep one authentication path across a laptop and the workspace. |
+| Foundation Model serving | **done** | The agent queries a serving endpoint through the SDK, with the endpoint as an argument so models can be compared. |
+| Incremental ingestion | **done** | Auto Loader reads only unseen files. Republished documents are resolved by publication time. |
+| Scheduled Job | **done** | `iberian-daily`, four tasks, 16:00 Europe/Lisbon. Ingest lands a trailing three day window derived from the run date, transform runs the pipeline, explain generates the explanations for episodes that have none, publish commits the dashboard data. |
+| Explanation generation in the Job | **done** | `pipelines/02_explain_episodes.py`. This is what makes the north star's "within fifteen minutes of publication" a property of the system rather than of somebody being at a laptop. Incremental: two or three episodes a day, capped at 25 so the first run after a gap cannot become a hundred model calls. |
+| Agent output as a table | **done** | `gold_episode_explanations`, written by the explain task rather than by the declarative pipeline. A deliberate exception to "the pipeline owns every table": the pipeline runs before the explanations exist, so a pipeline-owned copy would always be a day behind. The JSONL in the Volume stays the record of work and the table is overwritten from it on every run, so the file is always the side that is right. |
+| Publishing to the web | **done** | `pipelines/03_publish_dashboard.py` builds the JSON from the gold tables and commits it over the GitHub contents API. Render watches the branch, so the commit is the deploy. Nothing is committed when the data has not changed. |
+| Web service on Render | **done** | The dashboard is served at `/`, from published data, with no sign in. The Databricks authorization code flow still works end to end at `/auth`. |
+| Lakebase, gold sync, CDF back to Delta | **blocked** | The workspace issues OAuth app integrations rather than service principal secrets. See the auth note below. |
+| Databricks Vector Search | **not started** | For the notice text. Retrieval today is a direct A78 query with the point in time filter in Python. |
+| Mosaic AI Agent Framework | **done, not deployed** | `agents/mibel_agent.py` is an MLflow `ResponsesAgent`, the interface Databricks currently recommends, registered in Unity Catalog as `bootcamp_students.doriel.mibel_agent` by `scripts/register_agent.py`. The library is packaged with it, and that is checked rather than assumed: the registered version is loaded in a separate process outside the repository, and `iberian` has to import from the model's own `code/` directory. Serving it behind an endpoint was left out on purpose; the daily Job calls the same code directly, and an endpoint would add a running cost for no user. |
+| MLflow tracing | **done** | `agent/tracing.py` resolves `mlflow.trace` once, or a no-op where MLflow is absent, so the library keeps no platform imports and the suite still runs in two seconds. Retrieval, generation and verification appear as nested spans. |
+| MLflow experiment tracking | **done** | `agent/experiment.py`. Each evaluation run records endpoint and attempts as parameters, the north star plus five supporting metrics, the explanations file as an artifact, and the failing episodes as a tag. |
+| Unity Catalog trace storage | **attempted, not used** | Provisions and binds correctly; nothing exports. See below. |
+| Asset Bundles | **done** | `databricks.yml` plus `resources/iberian_job.yml`, bound to the existing job id so the run history survived. The Job is managed by the bundle, so the definition is changed in YAML rather than by clicking: an edit made in the interface is overwritten by the next deploy. |
+| CI | **partial** | Tests, an offline check that every `notebook_path` resolves and every bundle variable is declared, and an install of the app's own requirements in a clean environment. It does not deploy: see the auth note. |
 
-That rule is what keeps the test suite at two seconds. The moment a Databricks
-import appears under `src/iberian/`, every test needs a cluster to run.
+### A note on authentication
 
-```
-src/iberian/
-  config.py  market_time.py        settings, and the Iberian market day
-  ingestion/                       API clients, one per source
-  parsing/                         payloads to tidy rows
-  analysis/                        pure functions on dataframes
-  pipeline/                        gold table builders, dedupe
-  agent/
-    facts.py                       retrieved evidence, as sourced facts
-    verify.py                      rejects any figure that was not retrieved
-    explain.py                     the generate, check, retry once loop
-    tracing.py                     MLflow's decorator, or a no-op without it
-    experiment.py                  an evaluation run, as an MLflow run
-    batch.py                       which episodes need explaining, and merging
-    table.py                       the explanations as a typed, commented table
-  publish/
-    dashboard.py                   gold tables to the published JSON
-    github.py                      commit a built file over the contents API
+This workspace issues OAuth app integrations, not service principals with
+machine to machine secrets. An app integration only supports the authorization
+code flow, so the web service authenticates as whoever signs in and inherits
+their permissions.
 
-agents/
-  mibel_agent.py                   the agent as an MLflow ResponsesAgent
+The consequence shapes the product rather than being a detail of it: anything
+behind the sign in requires an account in this Databricks workspace, which none
+of the three target users has. Public pages therefore have to be served from
+published data rather than from a live query.
 
-pipelines/
-  01_build_medallion.py            ingest task: APIs to the Volume
-  02_explain_episodes.py           explain task: new episodes to the Volume
-  03_publish_dashboard.py          publish task: gold to a commit
-  transformations/                 the declarative pipeline, 18 tables
+The same policy blocks automated deployment. Personal access tokens are
+disabled for this workspace and no service principal is available, so continuous
+integration has no way to authenticate to Databricks. It costs less than it
+sounds: the Job is configured with `git_source` and snapshots the branch on
+every run, so a `git push` already changes the code that runs in production. CI
+therefore checks and does not deploy, and `databricks bundle deploy -t prod`,
+which only changes the Job definition, stays a deliberate manual step.
 
-app/
-  main.py                          FastAPI: the dashboard and the OAuth flow
-  public/index.html                the page
-  public/data.json                 written by the Job, not by hand
+A second, unrelated trap sits next to this one. The Databricks SDK treats
+`DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` as machine to machine
+credentials and will use them in preference to a CLI profile, failing with
+`invalid_client`. The app's own OAuth credentials are therefore named
+`APP_OAUTH_CLIENT_ID` and `APP_OAUTH_CLIENT_SECRET`.
 
-scripts/                           every entry point, see the sections below
-tests/                             synthetic data, no network, no credentials
-resources/iberian_job.yml          the daily Job
-databricks.yml                     the Asset Bundle
-.github/workflows/ci.yml           tests and checks on every push
-```
+## The analytical core
 
-### The two MLflow files, and why they are library code
-
-`agent/tracing.py` and `agent/experiment.py` sit under `src/iberian/` rather
-than in `scripts/`, which looks wrong at first because MLflow is a platform
-thing.
-
-They are there because the agent uses them. `facts.py`, `verify.py` and
-`explain.py` are decorated by `tracing.trace`, so it has to be importable
-wherever they are. `experiment.py` is used by `scripts/explain_episodes.py` and
-could have lived there, but then a notebook that wanted to record a run would
-have to import from a scripts directory, which is the shape that cost three
-failed Job runs already.
-
-Neither breaks the no-platform-imports rule, because neither imports MLflow at
-module level. They try, and carry on without it. Run the suite on a machine that
-has never installed MLflow and it passes; install it and three extra tests start
-running against the real decorator.
-
----
-
-## The mental model
-
-Five layers, and each one is worth poking at separately.
-
-**Raw** holds API payloads byte for byte, exactly as they arrived. Nothing is
-interpreted. If a parser turns out to be wrong, this is what gets reprocessed
-instead of re-hitting a rate limited API. Locally it is `data/raw/`, on
-Databricks a Unity Catalog Volume with the same directory layout, which is why
-a local backfill can be copied up and read without translation.
-
-**Bronze** exists only on Databricks: a streaming table over the Volume, read as
-`binaryFile`, so the payload is stored exactly as it arrived and Auto Loader
-tracks which files it has already seen.
-
-**Silver** is those payloads parsed into tidy rows, one table per source, no
-business logic applied.
-
-**Gold** is the three persona tables, plus weather context and the two
-validations.
-
-**The analysis modules** (`src/iberian/analysis/`) are pure functions on
-dataframes. No network, no credentials, no Databricks.
-
-**The agent** (`src/iberian/agent/`) assembles retrieved facts, asks a model to
-phrase them, and rejects the answer if it contains a figure that was not
-retrieved. Only the model call touches a network.
-
----
-
-## Locally
-
-```bash
-cd ~/repos/iberian-energy
-source .venv/bin/activate
-export $(grep -v '^#' .env | xargs)
-```
-
-### Start here
-
-```bash
-python -m pytest tests/ -q          # 279 tests, no network, under five seconds
-python scripts/run_market_splitting.py --demo   # whole pipeline, synthetic data
-python scripts/explore.py tables    # what the last run produced
-```
-
-The demo plants two known splits in a synthetic week, so the detection is
-verifiable by eye before trusting it on real data.
-
-### Building the medallion
-
-```bash
-# One market day, cheap
-python scripts/build_medallion.py --start 2026-09-03 --days 1
-
-# A month, for a daily profile that actually means something
-python scripts/build_medallion.py --start 2026-08-01 --days 31
-
-# Recompute gold from the silver already on disk, no API calls at all
-python scripts/build_medallion.py --from-silver
-
-# Skip a source to see the pipeline degrade gracefully
-python scripts/build_medallion.py --start 2026-09-03 --days 1 --skip-weather
-```
-
-`--from-silver` is the one to use after changing anything in `analysis/` or
-`pipeline/gold.py`. It runs the same `build_gold()` the full pipeline runs, so
-there is no second code path that can drift from the first.
-
-Seven days is not enough to tell a manufacturer when to run equipment. Thirty
-is a minimum, sixty is better. That run costs nothing but time.
-
-### Exploring what it built
-
-```bash
-python scripts/explore.py profile              # persona 1: when does PT pay?
-python scripts/explore.py episodes             # persona 2: duration, cause, cost
-python scripts/explore.py day --date 2026-09-03    # just the splits that day
-python scripts/explore.py day --date 2026-09-03 --all   # every interval
-python scripts/explore.py weather              # does solar move the ES price?
-python scripts/explore.py compare              # ENTSO-E against OMIE
-```
-
-`explore.py weather` reports two numbers per location: the raw correlation and
-the same correlation computed within each hour of the day. They disagree badly,
-and the second is the one to believe. See [the weather result](#the-weather-result-and-why-the-obvious-version-was-wrong).
-
-### Investigating one number
-
-These take a real question and answer it with sourced figures.
-
-```bash
-# Why did Portugal pay 28 EUR/MWh more at this moment?
-python scripts/explain_interval.py --at 2026-09-03T18:00
-
-# Show the leak the point in time filter prevents
-python scripts/explain_interval.py --at 2026-09-03T18:00 --no-point-in-time
-
-# The capacity curve, hour by hour, with splits marked
-python scripts/show_capacity.py --start 2026-09-03 --days 2
-
-# Prices side by side around an episode, from already landed XML
-python scripts/show_window.py --from 2026-09-03T16:30 --to 2026-09-03T19:00
-
-# Does a full border explain the splits, across a range?
-python scripts/analyse_saturation.py --start 2026-09-01 --days 7 --show-splits
-
-# The cost figure against REE's published congestion rent
-python scripts/check_congestion_rent.py --start 2026-07-01 --days 60
-```
-
-The last one is now also a gold table, `gold_cost_validation`. The script
-remains useful for a quick answer without a cluster.
-
-### Poking at the tables directly
-
-```python
-import pandas as pd
-pd.set_option("display.width", 200)
-
-g = pd.read_parquet("data/lakehouse/gold/gold_interval_premium.parquet")
-
-g[g.is_decoupled][["ts_utc", "premium_eur_mwh", "utilisation"]]
-g.groupby("market_day").is_decoupled.sum()
-g.groupby("hour_of_day_utc").premium_eur_mwh.mean().sort_values()
-
-# Splits that saturation does NOT explain, which are the interesting ones
-g[(g.is_decoupled) & (~g.is_saturated.fillna(False))]
-```
-
-That last query is the one to keep an eye on. Every row in it is a split the
-current story does not account for, and the pattern in them is where the next
-real result lives.
-
----
-
-## The dashboard
-
-The page all three target users get, with no sign in. It is a single HTML file
-and a single JSON file, so it needs no warehouse, no token and no call to REE at
-request time.
-
-```bash
-pip install -r requirements-app.txt
-python scripts/export_public_data.py
-python -m uvicorn app.main:app --reload --port 8000
-```
-
-Then open `http://127.0.0.1:8000`.
-
-`python -m uvicorn` rather than `uvicorn`. If the system package manager has
-also installed uvicorn, the bare command runs the system Python and cannot see
-anything in the virtual environment, which surfaces as `No module named
-'fastapi'` while fastapi is plainly installed.
-
-| Route | What it is |
+| Capability | Status |
 |---|---|
-| `/` | the dashboard |
-| `/data.json` | the published gold data the page reads |
-| `/auth` | Databricks sign in status, and the start of the OAuth flow |
-| `/healthz` | liveness, and whether the data file is actually present |
+| Market splitting detection | **done**, with episode grouping and correct quarter hourly arithmetic |
+| Interconnection saturation as the mechanism | **done**, verified interval by interval |
+| Attribution to named transmission assets | **done**, with the unexplained remainder reported explicitly |
+| Point in time correctness | **done**, enforced server side via `periodStartUpdate` and client side in `binding_assets` |
+| Cross source price validation | **done**, as a gold table, not a script |
+| Cost figure validated against the system operator | **done**, as a gold table, not a script |
+| Weather effect, controlled for time of day | **done**, and the naive version was wrong |
+| Demand forecast error | **partial**, the series are in silver, the analysis is not written |
+| Agent receives retrieved facts only | **done**, `agent/facts.py` assembles named, sourced facts and the model never sees market data |
+| Numeric hallucination checked programmatically | **done**, `agent/verify.py`, with an unverified answer never returned |
+| Human labelled episodes | **done**, all 48 |
+| North star metric measured | **done** for groundedness, over the full labelled set and two models |
+| ~100 hand labelled outage notices | **not started** |
 
-`/healthz` reports the data file on purpose. A health check that only proves the
-process is up reports green while the page renders empty.
+## Validated results
 
-### Where the data comes from
+Four checks. Two are against publishers that share no code with this project,
+the third is internal but adversarial by construction, and the fourth asks
+whether a striking shape in the data is the market or a fault. The first three
+are recomputed by the pipeline on every run rather than by a human remembering
+to invoke a script.
 
-`scripts/export_public_data.py` reads the local Parquet build. The Job runs the
-same builder against the Delta tables, through `iberian.publish.dashboard`, and
-commits the result. Both produce the same document; only the source differs.
+### Prices, against OMIE
 
-One difference between the two paths is deliberate. The local build does not
-write the two validation tables, so on that path they are recomputed from silver
-and from the stored ESIOS payloads. On Databricks the pipeline already owns them
-as tables and they are read rather than recomputed. Either way the numbers come
-out of the same functions in `iberian.analysis.validation`.
+ENTSO-E and OMIE publish the same settled day-ahead prices through entirely
+separate channels. Across the 60 market day window from 2026-07-16 to
+2026-09-13, **5,760 intervals, the two agree on every one, with a largest
+difference of zero**. Not within the one cent tolerance the check allows:
+identical. The live dashboard carries the current figures, which move with each
+daily run.
 
-**The Job owns `app/public/data.json`.** Run the export locally to look at the
-page, but discard it before committing, or a stale local build overwrites what
-the Job published:
+That is a stronger result than it first sounds. The Iberian market day runs from
+local midnight in CET rather than UTC midnight, the day is 96 quarter hourly
+intervals, and ENTSO-E omits a repeated value from its XML rather than
+publishing it twice. An error in the market day boundary, the interval grid or
+the sparse Point handling would misalign the two series and appear here at once.
 
-```bash
-git checkout app/public/data.json
-```
+The table keeps every compared interval with both prices and the difference, so
+a future disagreement is visible as a row rather than as a failed assertion.
+`gold_price_source_agreement` carries an expectation on `agrees` that records
+rather than drops, because a disagreement is a finding to report and not a
+reason to withhold data.
 
-### On Render
+### Cost, against REE
 
-| Setting | Value |
+`gold_split_episodes.extra_cost_eur` is the premium Portugal paid multiplied by
+the energy actually imported while the zones priced apart, computed from
+ENTSO-E prices and schedules. REE publishes the congestion rent on the same
+border. Across the same 60 market days:
+
+| | |
 |---|---|
-| Build command | `pip install -r requirements-app.txt` |
-| Start command | `python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| Health check path | `/healthz` |
-
-`$PORT` and `--host 0.0.0.0` are both required: Render assigns the port and
-stops a service that is not listening on it, and without the host it accepts
-connections only from inside the container.
-
-Environment variables are `DATABRICKS_HOST`, `DATABRICKS_REDIRECT_URI`,
-`DATABRICKS_SCOPES`, `APP_OAUTH_CLIENT_ID` and `APP_OAUTH_CLIENT_SECRET`. The
-last two are not called `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`
-for the reason in the troubleshooting section below.
-
-The free instance sleeps when idle. A sign in started before it restarted fails
-with "unknown state", because the pending flow is held in memory; `/callback`
-says so rather than blaming the user.
-
----
-
-## On Databricks
-
-Four pieces, in this order: a notebook that fetches and lands, a pipeline that
-transforms, a notebook that explains, and a notebook that publishes. The first
-writes no tables, the second makes no HTTP requests, the third calls a model and
-writes neither tables nor payloads, and the fourth makes one authenticated HTTP
-request and nothing else. None of those is an accident.
-
-A declarative pipeline is given data and asked to derive tables from it. Putting
-a rate limited API call inside a unit of work the platform is entitled to retry
-would be a mistake. And a pipeline only manages tables it created, so a notebook
-writing the same names both breaks the pipeline and gives two implementations of
-one transformation.
-
-### One time setup
-
-**Secrets.** Both tokens live in a scope, never in a widget: a widget's value is
-saved with the notebook state and this repository is public.
-
-```bash
-databricks secrets create-scope iberian
-databricks secrets put-secret iberian entsoe_token
-databricks secrets put-secret iberian esios_token
-databricks secrets put-secret iberian github_token
-```
-
-Run each without flags and it opens an editor to paste into, which keeps the
-value out of the shell history. `github_token` is a fine grained personal access
-token scoped to this repository alone, with **Contents: Read and write** and
-nothing else. GitHub adds **Metadata: Read-only** by itself, which is required
-for any repository permission.
-
-**Git folder.** Clone the repository into the workspace. The notebook and the
-pipeline both import `src/iberian/` from it rather than carrying copies.
-
-**The pipeline.** In **Jobs & Pipelines**, create an ETL pipeline with:
-
-| Setting | Value |
-|---|---|
-| Source code | `pipelines/transformations` inside the Git folder |
-| Default catalog and schema | where the tables should land |
-| Configuration | `iberian.catalog`, `iberian.schema`, `iberian.raw_volume`, `iberian.src_path` |
-| Compute | serverless |
-
-`iberian.src_path` is the absolute path to `src/` in the Git folder. The file
-tries `__file__` first and falls back to this, because `__file__` is not defined
-in every execution context.
-
-Keep `spark.sql.ansi.enabled` at `true`. It is what turned a stray reference
-file in the landing zone into a visible error rather than a silent null.
-
-### Running it
-
-**1. Ingestion.** Open `pipelines/01_build_medallion.py`, set the widgets and
-**Run all**.
-
-```
-catalog       bootcamp_students
-schema        doriel
-volume        raw
-start_day     2026-07-16
-days          65
-secret_scope  iberian
-```
-
-It fetches ENTSO-E prices for both zones, the cross-border schedules and
-capacity in both directions, the OMIE files, Open-Meteo for six locations and
-four ESIOS indicators, and lands every payload in the Volume. Landing the same
-window twice is safe.
-
-**2. The pipeline.** **Dry run** first: it validates the code and the dependency
-graph in seconds without writing anything, which catches an import or a schema
-mistake before a cluster spends minutes on it. Then **Run pipeline**.
-
-Auto Loader reads only the files it has not seen, so a daily run costs seconds.
-Gold is recomputed in full, which at a few thousand rows also costs seconds.
-
-**3. Explanations.** Open `pipelines/02_explain_episodes.py` and **Run all**. It
-reads `gold_split_episodes`, works out which episodes have no explanation on
-file, and calls the serving endpoint for those. Worst first, so if the cap bites
-the explained ones are the ones anybody would have looked at first. Set the
-`rebuild` widget to `yes` only to re-explain everything, which costs one model
-call per episode.
-
-It then writes `gold_episode_explanations`, overwritten in full from the JSONL
-on every run. The file is the record of work and the table is a materialisation
-of it, so if the two ever disagree the file is right. Every column carries a
-comment, because a gold table a journalist or a grader is expected to query
-should explain itself:
-
-```sql
-SELECT e.market_day, e.peak_spread, x.text
-FROM   bootcamp_students.doriel.gold_split_episodes  e
-JOIN   bootcamp_students.doriel.gold_episode_explanations x
-  ON   x.episode_key = concat(e.market_day, 'T', date_format(e.start_utc, 'HHmm'))
-WHERE  x.grounded
-ORDER  BY e.peak_spread DESC
-LIMIT  10;
-```
-
-**4. Publishing.** Open `pipelines/03_publish_dashboard.py` and **Run all**. It
-reads the gold tables, builds the same JSON the local export builds, and commits
-it to the branch. Render watches the branch, so the commit is the deploy.
-
-It prints where it found the checkout before it imports anything, which is the
-first thing to read if it fails:
-
-```
-Working directory: /Workspace/Repos/.internal/<id>_commits/<sha>/pipelines
-Repo root:         /Workspace/Repos/.internal/<id>_commits/<sha>
-```
-
-If the data has not changed it prints `unchanged` and commits nothing. Set the
-`force` widget to `yes` to commit anyway, which is worth doing once to prove the
-token works and never on a schedule.
-
-### The 18 tables
-
-| Layer | Tables |
-|---|---|
-| Bronze | `bronze_entsoe_prices`, `bronze_entsoe_schedules`, `bronze_entsoe_capacity`, `bronze_omie`, `bronze_open_meteo`, `bronze_esios` |
-| Silver | `silver_entsoe_prices`, `silver_entsoe_schedules`, `silver_entsoe_capacity`, `silver_omie_prices`, `silver_weather`, `silver_esios_indicators` |
-| Gold | `gold_interval_premium`, `gold_daily_profile`, `gold_split_episodes`, `gold_weather_context`, `gold_price_source_agreement`, `gold_cost_validation` |
-
-Plus `gold_episode_explanations`, which is written by the `explain` task rather
-than by the pipeline, for the reason given in that notebook.
-
-```mermaid
-flowchart LR
-    subgraph bronze["Bronze: the payload as it arrived"]
-        direction TB
-        B1["bronze_entsoe_prices"]
-        B2["bronze_entsoe_schedules"]
-        B3["bronze_entsoe_capacity"]
-        B4["bronze_omie"]
-        B5["bronze_open_meteo"]
-        B6["bronze_esios"]
-    end
-
-    subgraph silver["Silver: parsed, one table per source, no business logic"]
-        direction TB
-        S1["silver_entsoe_prices"]
-        S2["silver_entsoe_schedules"]
-        S3["silver_entsoe_capacity"]
-        S4["silver_omie_prices"]
-        S5["silver_weather"]
-        S6["silver_esios_indicators"]
-    end
-
-    subgraph gold["Gold: every table serves a persona or checks a number"]
-        direction TB
-        G1["gold_interval_premium<br/>persona 1 and 3"]
-        G2["gold_daily_profile<br/>persona 1"]
-        G3["gold_split_episodes<br/>persona 2"]
-        G4["gold_weather_context<br/>persona 2 and 3"]
-        G5["gold_price_source_agreement<br/>checked against OMIE"]
-        G6["gold_cost_validation<br/>checked against REE"]
-    end
-
-    GX["gold_episode_explanations<br/>persona 2, written by the explain task"]
-
-    B1 --> S1
-    B2 --> S2
-    B3 --> S3
-    B4 --> S4
-    B5 --> S5
-    B6 --> S6
-
-    S1 --> G1
-    S2 --> G1
-    S3 --> G1
-    S1 --> G2
-    S2 --> G2
-    S3 --> G2
-    S1 --> G3
-    S2 --> G3
-    S3 --> G3
-    G1 --> G4
-    S5 --> G4
-    S1 --> G5
-    S4 --> G5
-    G3 --> G6
-    S6 --> G6
-    G3 --> GX
-```
-
-Three things the picture makes obvious that the table above does not.
-
-**Bronze to silver is one to one.** Every source gets its own silver table and
-no business logic happens on that hop, so a parsing bug is fixed by replaying
-bronze rather than by re-fetching from a rate limited API.
-
-**The first three gold views are siblings, not a chain.** `gold_interval_premium`,
-`gold_daily_profile` and `gold_split_episodes` each read the same three silver
-tables and compute all three results internally, returning one. That is what
-keeps the interval premium, the daily profile and the episode boundaries
-arithmetically consistent with each other.
-
-**The two validations sit in gold on purpose.** `gold_price_source_agreement`
-and `gold_cost_validation` are checks against publishers outside this project,
-and they are tables recomputed on every run rather than scripts somebody
-remembers to invoke.
-
-### Checking it agrees with the local build
-
-This is the check worth running after any change to the analysis, because it is
-the one that proves moving the code did not move the numbers.
-
-```sql
-SELECT market_day,
-       count(*) AS episodes,
-       round(sum(extra_cost_eur)) AS eur,
-       round(max(max_abs_spread), 2) AS worst_spread
-FROM bootcamp_students.doriel.gold_split_episodes
-GROUP BY 1 ORDER BY 1;
-```
-
-```bash
-python - <<'EOF'
-import pandas as pd
-e = pd.read_parquet("data/lakehouse/gold/gold_split_episodes.parquet")
-print(e.groupby("market_day")
-       .agg(episodes=("episode_id", "count"),
-            eur=("extra_cost_eur", lambda s: round(s.sum())),
-            worst_spread=("max_abs_spread", lambda s: round(s.max(), 2)))
-       .to_string())
-EOF
-```
-
-Compare only the days present on both sides. They should match exactly. A one
-euro difference on a day is rounding, not divergence: SQL rounds a half up and
-Python rounds it to even, so a sum ending in `.5` differs by one. Check the
-unrounded sum before chasing it.
-
-### The two validations, as queries
-
-```sql
--- Do the two publishers agree, interval by interval?
-SELECT count(*) AS intervals,
-       sum(CASE WHEN agrees THEN 1 ELSE 0 END) AS agreeing,
-       round(max(pt_difference), 4) AS worst_pt_difference
-FROM bootcamp_students.doriel.gold_price_source_agreement;
-
--- Does the cost figure match REE's published congestion rent?
-SELECT round(sum(our_cost_eur)) AS ours,
-       round(sum(congestion_rent_eur)) AS ree,
-       round(100 * (sum(our_cost_eur) - sum(congestion_rent_eur))
-                 / sum(congestion_rent_eur), 4) AS difference_pct
-FROM bootcamp_students.doriel.gold_cost_validation;
-
--- The interesting rows: days REE recorded rent and this project found none
-SELECT * FROM bootcamp_students.doriel.gold_cost_validation
-WHERE episodes = 0 AND congestion_rent_eur > 0
-ORDER BY congestion_rent_eur DESC;
-```
-
-### When something fails
-
-**"MANAGED table already exists with that name."** A table of that name was
-created outside the pipeline, usually by an older version of the notebook. The
-pipeline only manages tables it created. Drop it and re-run: everything from
-bronze onwards is derived from the bytes in the Volume, so nothing is lost.
-
-**The gold tables fail with a timezone error.** Spark returns timestamps without
-a timezone and the market day is found by converting to CET. `as_utc` handles
-this at the boundary; if a new table skips it, this is the symptom.
-
-**A stream fails on a cast.** Something is in the landing zone that is not a
-response document. The ESIOS catalogue and the request metadata files are both
-filtered out by name for this reason.
-
-**The publish task cannot import `iberian`.** Read the `Repo root` line it
-prints. The import block is a copy of the one in `01_build_medallion`, which
-works, so a difference there is the thing to look at. Three runs were lost
-inventing a second mechanism before copying the one that was already proven.
-
-**The publish task says `unchanged`.** The data is the same as what is already
-committed, ignoring the timestamp. Usually it means the export was run locally
-and committed by hand. Set `force` to `yes` to override.
-
-**The commit is rejected with a conflict.** Something else wrote to the same
-path between the read and the write. Re-run; the next attempt reads the new sha.
-
-**`git push` is rejected with "fetch first".** The Job committed the data file
-to the branch. `git pull --rebase` then push. Running
-`git config pull.rebase true` once in this repository makes that the default,
-which matters because the Job commits every afternoon.
-
----
-
-## The daily Job
-
-`iberian-daily` runs four tasks in order at 16:00 Europe/Lisbon, which leaves
-margin after the Iberian day-ahead results are published in the early
-afternoon: `ingest`, `transform`, `explain`, `publish`.
-
-`explain` is the one that is easy to miss and the one that makes the north star
-metric a property of the system. It explains only episodes with no explanation
-on file, capped at 25 per run, and writes to
-`/Volumes/<catalog>/<schema>/<volume>/agent/explanations.jsonl`. It writes there
-rather than to the repository because within a single run the Git checkout is
-frozen at the commit the run started from, so a file this task committed would
-be invisible to `publish` in the same run. The Volume is where the tasks of this
-Job already hand things to each other.
-
-The definition lives in `resources/iberian_job.yml` and is deployed with the
-Asset Bundle. It was originally built by clicking, which is fine for finding out
-what the settings are and wrong as the place to keep them, then bound to the
-existing job id so the run history survived.
-
-```bash
-databricks bundle validate -t prod
-databricks bundle deploy -t prod
-databricks bundle run iberian_daily -t prod
-```
-
-Change the Job in the YAML, not in the interface. A bundle deployed Job is
-marked as managed by the bundle and the workspace restricts editing it there;
-either way an edit made by clicking is overwritten by the next deploy.
-
-### What deploy does and does not do
-
-**`bundle deploy` changes the Job definition only.** The schedule, the tasks,
-the retries, the parameters.
-
-**The code comes from the branch.** The Job is configured with `git_source`, so
-each run takes its own snapshot into
-`/Workspace/Repos/.internal/<id>_commits/<sha>`. A `git push` is therefore what
-changes the code that runs in production.
-
-**The workspace Git folder of the same repository is a different thing and no
-task reads it.** Pulling it changes nothing about what the Job runs. This cost
-three failed runs to establish, and the notebook now prints its own repo root so
-the question can be settled in one line rather than by argument.
-
-### Testing one task without the whole Job
-
-`ingest` and `transform` take about four minutes together. When iterating on
-`publish`, open the run in the UI and run that task alone rather than the Job.
-
-### Trailing window, not one day
-
-`ingest` asks for three market days ending today rather than one. ENTSO-E
-republishes corrected documents, so a trailing window picks up a correction.
-Landing a day twice is safe: `pipeline/dedupe.py` keeps the later publication.
-
----
-
-## Continuous integration
-
-`.github/workflows/ci.yml` runs on every push to `main` and on every pull
-request. Everything in it is offline, with no credentials and no data on disk.
-
-| Step | What it catches |
-|---|---|
-| `pytest -q` | the analysis, the parsers, the verifier, the publisher |
-| `scripts/check_bundle_paths.py` | a `notebook_path` matching no file, or a `${var.x}` that is not declared |
-| a clean install of `requirements-app.txt` | an import the app gained that was only ever installed as a side effect of the development requirements |
-
-Commits to `app/public/data.json` do not trigger it. The Job writes that file
-every afternoon, and running the suite because the market data changed says
-nothing about the code.
-
-**There is no deploy step, deliberately.** Personal access tokens are disabled
-in this workspace and no service principal is available, so CI cannot
-authenticate to Databricks at all. Given that `git push` is already what changes
-the running code, what was actually missing was anything checking the code
-first, and that is what this does. `bundle deploy` stays manual, and the things
-it changes change rarely.
-
-Run the checks locally the way CI does:
-
-```bash
-python -m pytest -q
-python scripts/check_bundle_paths.py
-```
-
----
-
-## Tracing and experiments
-
-Every evaluation run records itself. Nothing here is required to get the
-numbers: without MLflow installed the run says so and carries on, which is why
-`iberian/agent/tracing.py` exists at all.
-
-### Recording locally needs the full MLflow, not the skinny one
-
-`requirements.txt` pins `mlflow-skinny`, which is right for the Job: the
-notebook environment wants the small package and the project only needs tracing
-and logging there. Locally it is not enough. From MLflow 3.7 the default local
-backend is SQLite rather than `./mlruns`, and the skinny package ships without
-SQLAlchemy, so the database stores are never registered and a local run fails
-with `unsupported URI 'sqlite:///.../mlflow.db'`. Install the full package in
-the development environment and leave `requirements.txt` alone:
-
-```bash
-pip install mlflow                 # the full package, brings SQLAlchemy
-```
-
-This is a development dependency. Nothing in the Job needs it, and adding it to
-`requirements.txt` would put a package into the Job environment for the sake of
-a laptop.
-
-```bash
-# Local, recorded nowhere
-python scripts/explain_episodes.py --limit 3 --labelled-only --no-mlflow
-
-# Recorded in the workspace
-python scripts/explain_episodes.py --limit 3 --labelled-only \
-  --tracking-uri databricks
-```
-
-The run carries the endpoint, the attempt limit and the trace storage as
-parameters, six metrics,
-`evaluation/explanations.jsonl` as an artifact, and the failing episode keys as
-a tag.
-
-| Metric | Why it is there |
-|---|---|
-| `grounded_rate` | the north star, as a share so runs over different episode counts compare |
-| `first_attempt_rate` | a retry is not a failure, but it is worse, and the final verdict hides it |
-| `claims_per_explanation` | what stops the first metric being vacuous: 100% grounded over prose containing no figures is a perfect and meaningless score |
-| `numeric_claims` | the raw count behind it |
-
-Three spans appear per explanation: `episode_facts` as RETRIEVER,
-`explain` as AGENT and `verify` as PARSER. Read those before reading the code
-when an answer looks wrong, because the trace shows what each step actually
-received rather than what it was supposed to receive.
-
-### Unity Catalog trace storage does not work here
-
-MLflow recommends storing traces in Unity Catalog Delta tables rather than in
-the experiment. The flags exist:
-
-```bash
-export MLFLOW_TRACING_SQL_WAREHOUSE_ID=<a warehouse from `databricks warehouses list`>
-python scripts/explain_episodes.py --limit 3 --labelled-only \
-  --tracking-uri databricks \
-  --experiment /Users/<you>/iberian-energy-agent-uc \
-  --trace-catalog bootcamp_students --trace-schema doriel
-```
-
-It binds, it provisions all four `otel` tables, and it exports nothing. The
-spans table stays at zero rows across runs with the warehouse both cold and
-warm. No cause has been established. ROADMAP.md records what was observed.
-
-**Use a new experiment name if you try it.** A Unity Catalog trace location is
-permanent: once an experiment is bound it cannot be pointed elsewhere, so
-binding the one you already use costs you that experiment.
-
-Reading it back needs the SQL, not the API, because `search_traces` returned
-nothing even when asked correctly:
-
-```sql
-SELECT count(*) FROM <catalog>.<schema>.`<experiment id>_otel_spans`;
-```
-
-
----
-
-## The evaluation set
-
-The north star metric needs human labels. They cannot be generated, and in
-particular they cannot be generated by the same system that produced the
-candidate cause, because then the metric measures the project agreeing with
-itself.
-
-```bash
-# Build the labelling sheet from the episodes in gold
-python scripts/build_evaluation_set.py
-
-# Label them one at a time, in the terminal
-python scripts/label_episodes.py
-
-# Only ten, then stop
-python scripts/label_episodes.py --limit 10
-
-# Revisit ones already labelled
-python scripts/label_episodes.py --all
-```
-
-By default the episodes are interleaved across strata rather than ordered by
-spread, so a partially labelled sheet is still representative. `--by-spread`
-gives the largest first.
-
-`evaluation/cause_vocabulary.md` holds the allowed causes and what each one
-means. When the evidence does not settle it, `unclear` is a real answer and a
-more useful one than a guess, because it is a class the agent must also be able
-to produce.
-
-All 48 episodes are labelled.
-
-## Running the agent
-
-The agent needs a Databricks serving endpoint, so this is the one local command
-that authenticates to the workspace.
-
-```bash
-# Read the fact sheets without spending a token
-python scripts/explain_episodes.py --dry-run --limit 5
-
-# Run it for real
-python scripts/explain_episodes.py --limit 5
-
-# Only episodes a human has labelled, which is what the metric needs
-python scripts/explain_episodes.py --labelled-only
-
-# One episode, by key. Re-runs it even though it is already on file, because
-# that is the only reason to name one. This is how a rejection gets diagnosed.
-python scripts/explain_episodes.py --episode 2026-08-01T1100
-python scripts/explain_episodes.py --episode 2026-08-01T1100 --dry-run
-
-# A larger model, to test whether grounding or model size does the work
-python scripts/explain_episodes.py --labelled-only \
-  --endpoint databricks-claude-opus-4-5 \
-  --out evaluation/explanations_opus.jsonl
-```
-
-By default only episodes with no explanation on file are run, because an
-episode's evidence is fixed once its market day settles and re-explaining the
-other hundred and twenty-three would spend model calls reproducing answers that
-already exist. `--all` re-runs everything. Records are merged by episode key,
-never overwritten wholesale: an early version of this script overwrote the file
-and a `--limit 3` test run silently destroyed 45 explanations.
-
-Output lands in `evaluation/explanations.jsonl`, one record per episode, with
-the rejected drafts and the final failing draft kept. The rejections are the
-interesting rows: if the verifier never rejects anything, either the model is
-flawless or the check is weak, and that needs settling rather than assuming.
-
-`--dry-run` still performs retrieval. Only the model call is skipped. A preview
-that showed different facts from the real run would be worse than no preview.
-
-### Reading the failures
-
-```bash
-python - <<'EOF'
-import json, pathlib
-for name in ["explanations.jsonl", "explanations_opus.jsonl"]:
-    path = pathlib.Path("evaluation") / name
-    if not path.exists():
-        continue
-    for line in path.open():
-        record = json.loads(line)
-        if record["grounded"]:
-            continue
-        print("=" * 70, f"\n{name}  {record['episode_key']}  {record['unsupported']}\n")
-        print(record.get("final_draft") or record["rejected_drafts"][-1])
-EOF
-```
-
-### If the SDK fails with `invalid_client`
-
-The Databricks SDK reads `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`
-from the environment and tries machine to machine auth with them, ignoring the
-CLI profile. The app's OAuth credentials are named `APP_OAUTH_CLIENT_ID` and
-`APP_OAUTH_CLIENT_SECRET` for exactly this reason. If an older `.env` still
-exports the reserved names:
-
-```bash
-env -u DATABRICKS_CLIENT_ID -u DATABRICKS_CLIENT_SECRET \
-  python scripts/explain_episodes.py --labelled-only
-```
-
----
-
-## Things worth breaking on purpose
-
-The guards in this codebase exist because each one protects a number that would
-otherwise be wrong in a way nobody notices. Watching them fire is the fastest
-way to understand what they are for.
-
-**Make the two zones disagree on resolution.**
-
-```python
-import sys; sys.path.insert(0, "src")
-import pandas as pd
-from iberian.analysis.market_splitting import build_spread_series
-from iberian.config import EIC_PORTUGAL, EIC_SPAIN
-
-rows = pd.DataFrame([
-    {"zone_eic": EIC_PORTUGAL, "ts_utc": pd.Timestamp("2026-09-03T18:00Z"),
-     "price_eur_mwh": 50.0, "resolution": "PT15M"},
-    {"zone_eic": EIC_SPAIN, "ts_utc": pd.Timestamp("2026-09-03T18:00Z"),
-     "price_eur_mwh": 50.0, "resolution": "PT60M"},
-])
-build_spread_series(rows, EIC_PORTUGAL, EIC_SPAIN)   # raises
-```
-
-Without that guard the pivot lines an hourly price up with the first quarter of
-the hour and silently drops the other three.
-
-**Feed it duplicate timestamps.** Duplicate the PT row above with a different
-price and it refuses rather than picking one. That is the intraday contamination
-hit early on, where one A44 document carried day-ahead and three intraday
-auctions stacked on the same timestamps. It is also what fired the first time
-the pipeline read the whole landing zone, which is what `pipeline/dedupe.py`
-now resolves.
-
-**Give `to_market_day` a naive timestamp.**
-
-```python
-import pandas as pd
-from iberian.market_time import to_market_day
-to_market_day(pd.Timestamp("2026-08-18 23:30:00"))   # raises
-```
-
-It has to. The market day begins at local midnight, so assuming a timezone here
-would move every boundary by an hour or two and nothing would complain.
-
-**Change the settlement interval.** In `detect_episodes`, pass
-`step=pd.Timedelta(hours=1)` against quarter hourly data and watch every
-duration inflate by four while separate episodes merge into one. That was a real
-bug, and the arithmetic is now inferred from the data instead.
-
-**Move the market day boundary.** Edit `MARKET_TIMEZONE` in `config.py` to
-`"UTC"` and re-run `cross_check_prices.py`. The OMIE and ENTSO-E timestamps stop
-lining up and the merge collapses, which is exactly how one would discover the
-boundary is local midnight in CET and not UTC midnight.
-
-**Turn off the point in time filter** with `--no-point-in-time` on
-`explain_interval.py`. Notices published after the interval start appearing in
-the explanation. That is the hindsight leak the evaluation numbers depend on not
-having.
-
-**Invent a number in an explanation.** Take a record from
-`evaluation/explanations.jsonl`, change one figure, and run it back through
-`agent.verify.verify` against the sheet from `episode_facts`. The altered figure
-comes back in `verdict.unsupported`. The check allows thousands separators, a
-ratio written as a percentage, and rounding to the precision actually written.
-It allows nothing else, which is what stops it being theatre.
-
-**Swap the OMIE columns.** `orient_omie_columns` decides which column is
-Portugal by fitting both assignments. Feed it a frame with the columns reversed
-and it returns the other pair. On a fully coupled day the two are identical and
-the question has no answer, which is why the orientation is only meaningful once
-there is a split in the window.
-
-## Changing the analysis
-
-**Severity bands** live in `config.py` as `SEVERITY_BANDS`. The current 5 and 20
-EUR/MWh cuts are round numbers, not calibrated. With a month of data, look at
-the distribution of `abs_premium_eur_mwh` and set them on percentiles instead.
-
-**Saturation threshold** is `SATURATION_THRESHOLD` in
-`analysis/interconnection.py`, currently 0.98. Raise it to 1.0 and see how many
-episodes stop being explained; the published capacity and the schedule are
-rounded independently, which is why it is not 1.0.
-
-**The split threshold** is 0.01 EUR/MWh, and [ROADMAP.md](ROADMAP.md) quantifies
-exactly what ignoring it costs against REE's published figures. Do not lower it
-without reading that section.
-
-**Weather locations** are in `ingestion/open_meteo.py`. They are chosen for what
-drives the price rather than where people live, and the reasoning is in the
-comment next to each one. Adding one changes the column set of
-`gold_weather_context`, whose schema is built from `LOCATIONS`, so the pipeline
-follows automatically.
-
-**The agent's rules** are `SYSTEM_PROMPT` in `agent/explain.py`, ordered by
-importance. Changing them changes what the model writes but not what it is
-allowed to write: that is `agent/verify.py`, and the prompt is not what makes
-the guarantee.
-
-After changing any of these, run the tests. If nothing fails, the change was not
-covered, and that is worth a new test rather than a shrug.
-
-## The weather result, and why the obvious version was wrong
-
-Correlating Spanish solar radiation against the Spanish price across all hours
-gives about -0.79 in Andalusia, which looks like a strong finding and is mostly
-an artefact. Radiation and price both move with time of day, so the correlation
-is largely measuring the clock.
-
-`within_hour_correlation` compares observations within the same local hour
-instead, which removes it. The effect drops to about -0.14. The hour by hour
-table is more informative than either single number: near zero around midday,
-when the price is already at 22 to 25 EUR/MWh and cannot fall much further, and
-about -0.55 at 20h local, when the price is near 190 and a cloudy evening costs
-real money.
-
-The honest reading is a price floor effect rather than a linear relationship,
-and the Portuguese locations correlate closely enough with the Spanish ones that
-correlation alone cannot single out Andalusia as the driver.
+| This project | 11,302,847 EUR |
+| REE congestion rent | 11,303,022 EUR |
+| Difference | -0.0015% |
+
+This is not an independent measurement, since both series descend from the same
+market clearing: in implicit coupling the allocated capacity is the scheduled
+exchange. It is a check on the implementation, and a demanding one. The market
+day boundary in local CET, the 96 quarter hourly intervals, the forward fill of
+sparse Points, the direction of flow across the border and the sign of the
+spread all have to be correct for the figures to agree.
+
+The residual is fully accounted for. On most days the agreement is exact. On the
+rest, the price spread equals the 0.01 EUR/MWh threshold below which this
+project does not count a split. On 22 August, three intervals at 0.01 EUR/MWh
+with 5,400 MW crossing the border produce 40 EUR of rent that this project does
+not count.
+
+That threshold is deliberate and is not being changed. One cent per MWh is
+market rounding, and counting it would inflate the episode count with events no
+manufacturer or journalist would recognise as events. The cost of the choice is
+now quantified at 0.0015% of the total.
+
+It also shows why saturation and price separation need separate detectors. On
+that day the border was full and the prices separated by the minimum tick: a
+real constraint with no economic consequence. The saturation flag derives from
+utilisation against capacity rather than from the spread, so it registers the
+day regardless.
+
+`gold_cost_validation` keeps a row per market day including days where one side
+published and the other did not, because a day REE recorded rent for and this
+project found no episode on is exactly the kind of gap an inner join would
+delete.
+
+### Explanations, against the retrieved evidence
+
+Every figure in a generated explanation is checked against the set of values
+that were actually retrieved, and an explanation that fails is not returned.
+Over all 48 labelled episodes:
+
+| Model | Grounded | Passed first attempt | Verifier |
+|---|---|---|---|
+| `databricks-claude-haiku-4-5` | 48 of 48 | 45 | current, including the date check |
+| `databricks-claude-opus-4-5` | 48 of 48 | 48 | current, including the date check |
+
+**Same rules, same result, different route.** Both models reach 48 of 48. The
+difference is the three retries: Haiku wrote the wrong day three times, the
+retry caught all three, and Opus never made the slip. What reaches a reader is
+the same. That is the hypothesis the design rests on, that retrieval and
+verification do the work and model size matters little, now shown on two models
+under identical rules rather than argued.
+
+**No model has invented a number.** Across roughly a hundred drafts and two
+models, the numeric check has never rejected a figure that turned out to be
+fabricated. Every numeric rejection it has ever produced on live text was a
+defect in the check, five of them, listed below.
+
+**The three retries were all the same error, and it was a real one.** Three
+explanations stated a day that was not the episode's. A reader checking one
+claim would check that one, because a date is the only figure in the sentence
+they can verify without the data. The retry, told which date was wrong and which
+were permitted, corrected all three.
+
+#### The verifier's own defect record
+
+This is kept in full because the pattern is the finding. The first run of the
+full set reported 42 of 48 and 35 of 48, and every one of those rejections was
+the check being wrong, not the model:
+
+1. Dates written in prose. "Published on 25 June 2026" was read as the numbers
+   25 and 2026.
+2. The settlement interval length. Every explanation wants to write "the single
+   15 minute interval", and 15 was not in the fact sheet.
+3. Digits inside a retrieved asset name. `AT 2 400/220 SRM` is a transformer,
+   and 400 and 220 were read as invented measurements.
+4. Negative prices written with the typographic minus sign, U+2212, which the
+   extractor read as positive.
+5. Unit conversions. A duration retrieved as 0.5 hours, written as "the 30
+   minute window", was rejected. The figure came out of a document and the
+   arithmetic is fixed by the unit, so the check can and now does redo it.
+
+Defect 5 is worth singling out, because an earlier version of this document
+presented Opus's "this 45-minute episode" for a 0.75 hour episode as the check
+working correctly, and argued that a model which computes cannot be
+distinguished from one which computes wrongly without redoing the computation.
+That argument was wrong: the verifier can redo a unit conversion exactly and
+cheaply, and it now does. The showcase catch was a sixth false positive.
+
+Fixing defect 1 caused defect 6 by omission. Masking prose dates so they would
+not be read as numbers left the dates themselves entirely unchecked, which is
+how three wrong days reached the output. The date check is the fix, and it is
+the only check here that has ever caught a real error.
+
+Each defect is now a test. Two lessons, and the second is the uncomfortable one.
+Writing a verifier that never rejects honest text is harder than writing the
+verifier, and a check that cries wolf trains you to ignore it. And a check
+narrowed to stop false positives can silently stop checking: the fix to defect 1
+removed a whole class of error from view, and nothing failed to announce it.
+
+### The hourly concentration, checked rather than assumed
+
+Decoupling is not spread across the day. It concentrates in the middle of it,
+and a concentration that sharp is worth being suspicious of before presenting
+it, because a data fault and a market pattern look identical in a bar chart.
+
+`scripts/check_hourly_shape.py` is the check. Over 5,760 intervals and 61 market
+days:
+
+| UTC hour | Decoupled | Mean utilisation |
+|---|---|---|
+| 05 | 0.0% | 0.15 |
+| 08 | 25.8% | 0.84 |
+| 10 | **36.7%** | **0.91** |
+| 13 | 11.2% | 0.83 |
+| 16 | 1.2% | 0.57 |
+| 19 | 0.0% | 0.09 |
+
+Three things had to hold, and did.
+
+**The distribution has tails.** It rises from 0.4% at 06:00 to a peak at 10:00
+and decays through the afternoon, rather than starting and stopping. A hard
+edged band with exact zeros either side would have been the signature of
+something upstream, not of a market.
+
+**The edges move with the calendar.** In local time the band runs 09-17 in July,
+08-20 in August and 10-22 in September. Solar noon moves through the season, so
+a pattern driven by Spanish solar has to move with it. A pattern pinned to the
+same UTC hours all summer could not be the sun, since nothing physical is
+anchored to UTC.
+
+**Saturation happens where the prices separate and nowhere else.** Mean
+utilisation is 0.15 to 0.27 overnight and peaks at 0.91 in the same hour the
+splits peak. Outside the band the highest utilisation reached at all is 0.70:
+the border is not full, so there is nothing to decouple the zones. There is no
+ceiling short of saturation, which is the shape a generated series has and a
+market does not.
+
+Two honest qualifications. September carries thirteen days and 57 episodes, so
+that month's edges are individual events rather than a band. And the handful of
+splits at 17:00, 18:00 and 20:00 UTC, where utilisation reaches 1.0 with the sun
+already gone, are the evening demand peak rather than the solar flood. They are
+the same measurement of a different mechanism, and lumping them together would
+overstate how single-caused the pattern is.
+
+## Unity Catalog trace storage, tried and set aside
+
+MLflow's current guidance is that traces on Databricks belong in Unity Catalog
+Delta tables rather than in the experiment's own store. That was configured, and
+it does not work in this workspace. What is recorded here is what was observed,
+because the next person to try it deserves the evidence rather than a shrug.
+
+What worked:
+
+- The experiment bound to `UnityCatalog(catalog_name='bootcamp_students',
+  schema_name='doriel', table_prefix='2122925066106828')`, confirmed by reading
+  `experiment.trace_location` back.
+- MLflow provisioned all four tables, `..._otel_spans`, `_otel_logs`,
+  `_otel_metrics` and `_otel_annotations`, so the schema ownership, the
+  `CREATE TABLE` right and the SQL warehouse were all sufficient.
+- The evaluation ran, three explanations, all grounded, and the run itself was
+  recorded with its parameters, metrics and artifact.
+
+What did not:
+
+- `SELECT count(*)` on the spans table returns 0, after a run made with the
+  warehouse already `RUNNING`.
+- `mlflow.search_traces` returns nothing for that experiment.
+
+**The cause is not established.** The first failure came after a run that had to
+start a stopped warehouse, which made the serverless starter tier's auto-stop the
+obvious suspect. A second run with the warehouse warm exported nothing either, so
+that explanation does not hold and no other has been tested. Naming a cause here
+would be inventing one.
+
+The project therefore uses the experiment's own trace store, which works. Nothing
+depends on the Unity Catalog path: `--trace-catalog` and `--trace-schema` are
+optional flags and the default run does not pass them. The tracing itself is
+unaffected either way, since it is the same spans reaching a different
+destination.
+
+This is a limitation rather than a gap. Runs, parameters, metrics and artifacts,
+which is what the north star metric needs, are recorded and queryable. Spans are
+observability, and losing them costs debugging convenience rather than evidence.
+
+## The weather result, corrected
+
+The naive correlation between Spanish solar radiation and the Spanish price is
+about -0.79 in Andalusia. That number is mostly the clock: radiation and price
+both follow time of day, so a correlation across all hours measures the shared
+trend rather than the effect.
+
+Computed within each local hour, it falls to about -0.14. The hour by hour
+breakdown is the real finding: near zero around midday, when the price is
+already at 22 to 25 EUR/MWh and has little room to fall, and about -0.55 at 20h
+local, when the price is near 190. This reads as a price floor effect rather
+than a linear relationship.
+
+One honest limitation. The Portuguese locations track the Spanish ones closely
+enough that correlation alone cannot identify Andalusia specifically as the
+driver. Saying otherwise would be overclaiming.
+
+## The evaluation set, and what it deliberately is not
+
+48 episodes, all carrying a human label, stratified so that a partially labelled
+sheet was still representative while the work was in progress.
+
+The labels are not generated. That constraint is not fussiness: the rule based
+classifier already produces a candidate cause for every episode, so a set
+labelled by the same system would make the north star metric measure the project
+agreeing with itself, and the number would be worthless in exactly the way that
+is hardest to detect from the outside.
+
+That has a consequence worth stating plainly rather than hiding. The labeller
+saw the candidate cause while labelling, so the labels are anchored to some
+degree. The classifier and the human agree on every episode. The correct reading
+of that is not "the agent is 100% accurate on cause", it is that cause
+attribution on this evidence is close to mechanical, and the part that is not
+mechanical is whether the prose stays inside the evidence.
+
+So `explain_episodes.py` reports groundedness, not cause accuracy, and says so
+in its own output. Cause accuracy would be measuring the rule based classifier,
+which needs no model at all.
+
+## Three personas, three gold tables
+
+Every gold table must serve one of these users. A table nobody needs can be cut;
+a user with no table is a gap in the product.
+
+1. **Manufacturer deciding when to run equipment.** Needs the daily profile and
+   the premium by interval: `gold_daily_profile`, `gold_interval_premium`. The
+   worst hour is 10:00 UTC, midday local, decoupled in 36.7% of intervals, and
+   mean utilisation peaks in the same hour at 0.91. The concentration is real
+   and is the actionable part of the product: an hour that is reliably worse is
+   something a manufacturer can schedule around, where a single expensive
+   episode is not.
+2. **Journalist or regulator watcher needing a defensible number with a cause.**
+   Needs `gold_split_episodes` plus the attribution, the gap the notices do not
+   explain, `gold_cost_validation`, and a written explanation where every figure
+   names the document behind it.
+3. **Grid analyst tracking forecast error and interconnection saturation.**
+   Needs utilisation over time, the A78 curves and `gold_weather_context`.
+   Forecast error is the part still missing, and the ESIOS series for it are in
+   silver.
+
+## Open questions
+
+Things that are known to be unresolved, kept here rather than left implicit.
+
+- The `Pereiros-Rio Maior 1` notice, published 25 June, still appears as binding
+  in September. Either the notice has no end date, or the parser is holding it
+  open. Several labels carry `medium` confidence because of it, so this affects
+  the evaluation set and not only the display.
+- A78 notices are asset level while A61 is the net border figure after the
+  operator's security assessment. They are related but not the same quantity.
+  The fact sheet carries this as a caveat rather than pretending the gap is an
+  error to be explained away.
+- The numeric check has never caught an actual invention, because in roughly a
+  hundred drafts there was none to catch. Every numeric rejection it has
+  produced on live text was its own defect. Its strength against fabrication is
+  demonstrated by its tests rather than by use, and that distinction should be
+  made out loud rather than left for someone to notice. The date check is the
+  exception: it caught three real errors on its first run.
+- Episodes are counted from a spread above 0.01 EUR/MWh, so the labelled set
+  includes events of no economic consequence. `2026-08-01T1100` has a premium of
+  0.03 EUR/MWh on prices of 0.53 and 0.50. The threshold is right as a physical
+  test of decoupling, but the north star speaks of *significant* anomalies, and
+  reporting groundedness over the full set mixes in non-events. Reporting it
+  over `moderate` and `severe` episodes, with the full set as a secondary
+  figure, is the change to consider.
+- **Resolved: the unnamed asset is the publisher's, not ours.** The A78
+  notice published on 2026-07-17 is an A53 planned maintenance with no asset
+  block at all: no registered resource, no name, no identifier. The parser is
+  right. The fact sheet now says the operator did not name the asset, instead
+  of passing the parser's placeholder to the model as though it were a name.
+- **The verifier checks values, not what they are attached to.** Models wrote
+  "nine notices were in force, published on 13 August", fastening one notice's
+  publication date to the count of all of them. The date was in the sheet, so
+  it passed. Fixed at the source: the date is now keyed and annotated as
+  belonging to the most restrictive notice only. The general limitation stands
+  and is worth saying: a check on values cannot catch a true value attached to
+  the wrong subject.
+- Unity Catalog trace storage provisions its tables and binds the experiment,
+  and then exports nothing into them. Two runs, one cold warehouse and one warm,
+  both produced zero spans. No cause has been established and none should be
+  claimed until one is.
+- Episode grouping runs under a constant key so the whole series stays in one
+  frame. The natural partition is `market_day`, which would split an episode
+  running past local midnight in two. At a few thousand rows the constant key
+  costs nothing, but the limitation should be understood before changing it.
+
+## The plan to 2 October
+
+Twelve days. The platform and the delivery path are the solid parts and the
+daily loop closes end to end, so the remaining work is evidence and honesty,
+not infrastructure. Ordered by what the presentation cannot go without.
+
+### Must do
+
+1. ~~`gold_episode_explanations` as a Delta table.~~ **Done.** The explain task
+   now writes the table alongside the JSONL, with a comment on every column.
+2. ~~Re-run Opus over all 48 under the current verifier.~~ **Done.** 48 of 48,
+   all on the first attempt.
+3. ~~Register the `ResponsesAgent` in Unity Catalog.~~ **Done.** Version 3,
+   with the packaged code verified in a clean process. Versions 1 and 2 are
+   failed uploads from a missing `boto3`, see GUIDE.
+4. **Rehearse the presentation with the warehouse already warm.** A cold start
+   in front of an audience reads as the platform being slow.
+
+### Should do, in this order
+
+5. **Report groundedness over `moderate` and `severe` episodes** as the headline
+   figure, with the full set secondary. See the open question above.
+6. **The `constrained_asset` empty name.** One parser question, and it decides
+   whether the journalist persona's evidence names an asset or says "unnamed".
+7. **Resolve the `Pereiros-Rio Maior 1` notice**, since it touches the labels
+   and therefore the metric.
+8. **Demand forecast error** from the ESIOS series already in silver. The
+   missing half of persona 3, and the last table any persona is short of.
+9. **Vector Search over the notice text**, replacing the direct A78 query. The
+   point in time filter has to survive the move or the evaluation numbers leak
+   information from the future. This is the largest remaining item and the one
+   most likely to be cut; it is listed last on purpose.
+
+### Not doing, and why
+
+- **Lakebase read models and CDF back to Delta.** Blocked on a service
+  principal this workspace does not issue. The request is drafted; if it is
+  granted in time it unblocks CI deployment too, but nothing is planned around
+  it arriving.
+- **Unity Catalog trace storage.** Tried, provisions and binds, exports
+  nothing, no cause established. Documented above as a limitation.
+- **~100 hand labelled outage notices.** Only pays for itself if Vector Search
+  lands, and it is behind Vector Search in the queue.
+- **REN Datahub** for the Portuguese generation mix.
+- **A price forecasting model.** Out of scope by an early decision and the
+  decision still holds: it is hard to beat naive baselines and it distracts from
+  the explanation layer, which is the part of this project nobody else has.

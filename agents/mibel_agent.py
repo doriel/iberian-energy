@@ -144,6 +144,7 @@ class MibelExplanationAgent(ResponsesAgent):
                 "model": endpoint,
                 "numeric_claims": len(result.verdict.claims),
                 "unsupported": [claim.text for claim in result.verdict.unsupported],
+                "wrong_dates": [claim.text for claim in result.verdict.wrong_dates],
                 "missing_sources": result.verdict.missing_sources,
                 "sources": sheet.sources(),
                 "subject": sheet.subject,

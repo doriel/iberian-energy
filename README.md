@@ -184,6 +184,7 @@ scripts/
   build_evaluation_set.py        the labelling sheet
   label_episodes.py              label episodes in the terminal
   explain_episodes.py            run the agent and report groundedness
+  register_agent.py              log the agent and register it in Unity Catalog
   export_public_data.py          build the dashboard data from the local build
   check_bundle_paths.py          offline check that the bundle points at files
   check_hourly_shape.py          is the hourly concentration the sun or a fault
@@ -325,9 +326,10 @@ the smaller one, and what reaches a reader is the same.
 
 - Databricks Vector Search over the notice text. Retrieval today is a direct
   A78 query with the point in time filter applied in Python.
-- The agent registered in Unity Catalog. It is wrapped as an MLflow
-  `ResponsesAgent` in `agents/mibel_agent.py`, which is the interface Databricks
-  currently recommends, but registering it needs `CREATE MODEL` on the schema.
+- The agent served behind a Model Serving endpoint. It is registered in Unity
+  Catalog as `bootcamp_students.doriel.mibel_agent`, but not deployed: the daily
+  Job calls the same code directly, and an endpoint would cost money to run for
+  no user.
 - Deploying from CI. The tests and the configuration checks run on every push,
   but personal access tokens are disabled in this workspace and no service
   principal is available, so CI cannot authenticate to Databricks.
