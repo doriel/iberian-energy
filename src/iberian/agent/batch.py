@@ -26,6 +26,22 @@ from iberian.agent.facts import FactSheet, episode_facts
 from iberian.agent.tracing import SpanType, trace
 
 
+class EvidenceUnavailable(RuntimeError):
+    """The evidence for an episode could not be retrieved right now.
+
+    Raised rather than treating a failed fetch as "no notices were in force",
+    because those are different claims. The second would produce an
+    explanation stating that no transmission notice covered the window, which
+    is false, and it would pass verification because the sheet would honestly
+    contain zero notices. A skipped episode stays pending and the next run
+    picks it up; a wrong explanation is published and stays wrong.
+
+    The trigger that found this was ENTSO-E returning a 400 from its own
+    template engine for one market day, on a request that had worked the day
+    before.
+    """
+
+
 def episode_key(episode) -> str:
     """The identifier used everywhere: market day and the start time.
 
@@ -114,16 +130,25 @@ def explain_episodes(
     max_attempts: int = 2,
     truth_for: Callable[[str], str] | None = None,
     on_each: Callable[[str, object], None] | None = None,
+    on_skip: Callable[[str, Exception], None] | None = None,
 ) -> Iterator[dict]:
     """One record per episode, yielded as they are produced.
 
     Yielded rather than returned so a caller can write each one as it arrives.
     A batch that dies on episode forty should not lose the first thirty-nine,
     and at one model call each that is minutes of work.
+
+    An episode whose evidence cannot be retrieved is skipped, not recorded. No
+    record means it is still pending, so the next run tries it again.
     """
     for _, episode in episodes.iterrows():
         key = episode_key(episode)
-        sheet = build_sheet(episode)
+        try:
+            sheet = build_sheet(episode)
+        except EvidenceUnavailable as exc:
+            if on_skip:
+                on_skip(key, exc)
+            continue
         result = explain(sheet, complete, max_attempts=max_attempts, model=model)
         record = to_record(key, result, sheet, truth_for(key) if truth_for else "")
         if on_each:
@@ -159,7 +184,20 @@ def sheet_builder(client, intervals: pd.DataFrame, direction, parse, binding):
         day = episode["market_day"]
         if day not in curves_by_day:
             day_start, day_end = market_day_window(day)
-            response = client.transmission_unavailability(*direction, day_start, day_end)
+            try:
+                response = client.transmission_unavailability(
+                    *direction, day_start, day_end
+                )
+            except Exception as exc:
+                # Broad on purpose, and only around the network call: any
+                # failure here means the evidence is missing, whatever the
+                # client raised. Parsing stays outside, so a bug in our own
+                # code still fails loudly. A failed day is not cached, so the
+                # next episode on the same day tries again.
+                first_line = (str(exc).splitlines() or [type(exc).__name__])[0]
+                raise EvidenceUnavailable(
+                    f"A78 notices for market day {day}: {first_line[:200]}"
+                ) from exc
             curves_by_day[day] = [] if response.is_empty else parse(response)
 
         start = pd.Timestamp(episode["start_utc"]).to_pydatetime()

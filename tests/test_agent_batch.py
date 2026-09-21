@@ -16,6 +16,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from iberian.agent.batch import (  # noqa: E402
+    EvidenceUnavailable,
     episode_key,
     sheet_builder,
     explain_episodes,
@@ -265,3 +266,105 @@ def test_only_notices_published_before_the_episode_are_considered():
     )
     build(frame.iloc[0])
     assert seen["published_before"] == seen["start"]
+
+
+# --- evidence that cannot be fetched ----------------------------------------
+
+
+class FailingClient:
+    """ENTSO-E answering with an error, as it did for one market day."""
+
+    def __init__(self, failures: int = 99) -> None:
+        self.calls = 0
+        self.failures = failures
+
+    def transmission_unavailability(self, *args):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError(
+                "ENTSO-E returned 400. Reason: Failed to process template\n"
+                "long Java stack trace that nobody should have to read"
+            )
+        return FakeResponse()
+
+
+def failing_builder(client):
+    return sheet_builder(
+        client,
+        intervals_for("2026-08-18T0745", "2026-08-19T0730"),
+        ("ES", "PT"),
+        parse=lambda response: [],
+        binding=lambda *a, **k: [],
+    )
+
+
+def test_a_failed_fetch_is_evidence_unavailable_not_zero_notices():
+    # Zero notices would produce "no transmission notice covers this window",
+    # which is false and would pass verification.
+    import pytest
+
+    build = failing_builder(FailingClient())
+    with pytest.raises(EvidenceUnavailable) as caught:
+        build(episodes("2026-08-18T0745").iloc[0])
+    assert "2026-08-18" in str(caught.value)
+    assert "stack trace" not in str(caught.value), "only the first line is kept"
+
+
+def test_a_failed_day_is_not_cached():
+    # The next episode on the same day, or the next run, must try again.
+    import pytest
+
+    client = FailingClient(failures=1)
+    build = failing_builder(client)
+    episode = episodes("2026-08-18T0745").iloc[0]
+    with pytest.raises(EvidenceUnavailable):
+        build(episode)
+    build(episode)
+    assert client.calls == 2
+
+
+def test_a_bug_in_our_own_parsing_is_not_swallowed():
+    # The broad catch wraps only the network call. A parser that breaks must
+    # fail loudly, not be reported as ENTSO-E being unavailable.
+    import pytest
+
+    def broken_parse(response):
+        raise ValueError("our bug")
+
+    build = sheet_builder(
+        FakeClient(),
+        intervals_for("2026-08-18T0745"),
+        ("ES", "PT"),
+        parse=broken_parse,
+        binding=lambda *a, **k: [],
+    )
+    with pytest.raises(ValueError, match="our bug"):
+        build(episodes("2026-08-18T0745").iloc[0])
+
+
+def test_the_loop_skips_an_episode_without_evidence_and_carries_on():
+    def build(episode):
+        if episode_key(episode) == "2026-08-18T0745":
+            raise EvidenceUnavailable("A78 notices for market day 2026-08-18: 400")
+        return sheet_for(episode)
+
+    skipped = []
+    records = list(
+        explain_episodes(
+            episodes("2026-08-18T0745", "2026-08-19T0730"),
+            build,
+            lambda s, u: GROUNDED,
+            model="stub",
+            on_skip=lambda key, exc: skipped.append(key),
+        )
+    )
+    assert [r["episode_key"] for r in records] == ["2026-08-19T0730"]
+    assert skipped == ["2026-08-18T0745"]
+
+
+def test_a_skipped_episode_is_still_pending_next_time():
+    # No record was written for it, so the incremental run picks it up.
+    frame = episodes("2026-08-18T0745", "2026-08-19T0730")
+    written = [{"episode_key": "2026-08-19T0730", "grounded": True}]
+    remaining = pending(frame, written)
+    assert [episode_key(row) for _, row in remaining.iterrows()] == ["2026-08-18T0745"]

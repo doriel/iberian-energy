@@ -36,20 +36,19 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from iberian.agent.batch import (  # noqa: E402
+    EvidenceUnavailable,
     episode_key,
-    explain_episodes,
     load_records,
     merge,
     pending,
+    sheet_builder,
     to_record,
     write_records,
 )
 from iberian.agent.experiment import EvaluationRun  # noqa: E402
 from iberian.agent.explain import databricks_completer, explain  # noqa: E402
-from iberian.agent.facts import episode_facts  # noqa: E402
 from iberian.config import EIC_PORTUGAL, EIC_SPAIN, Settings  # noqa: E402
 from iberian.ingestion.entsoe import EntsoeClient  # noqa: E402
-from iberian.market_time import market_day_window  # noqa: E402
 from iberian.parsing.entsoe_outages import (  # noqa: E402
     binding_assets,
     parse_outages_response,
@@ -165,9 +164,9 @@ def main() -> int:
     if not args.all and not args.episode:
         before = len(episodes)
         episodes = pending(episodes, already)
-        skipped = before - len(episodes)
-        if skipped:
-            print(f"{skipped} episode(s) already explained, skipping. --all re-runs them.")
+        done = before - len(episodes)
+        if done:
+            print(f"{done} episode(s) already explained, skipping. --all re-runs them.")
         if episodes.empty:
             print("Nothing new to explain.")
             return 0
@@ -182,36 +181,26 @@ def main() -> int:
     client = EntsoeClient(Settings.from_env().require_entsoe_token())
     complete = None if args.dry_run else databricks_completer(endpoint=args.endpoint)
 
-    curves_by_day: dict[object, list] = {}
+    # The same retrieval the Job's explain task uses. This loop used to fetch
+    # the notices itself, and a copy is how the two drift: the local run and
+    # the published run must be given identical evidence.
+    build_sheet = sheet_builder(
+        client, intervals, DIRECTION, parse_outages_response, binding_assets
+    )
     records: list[dict] = []
+    skipped: list[str] = []
 
     print(f"{len(episodes)} episode(s)"
           + ("" if args.dry_run else f", endpoint {args.endpoint}") + "\n")
 
     for _, episode in episodes.iterrows():
-        window = intervals[
-            (intervals["ts_utc"] >= episode["start_utc"])
-            & (intervals["ts_utc"] < episode["end_utc"])
-        ]
-
-        day = episode["market_day"]
-        if day not in curves_by_day:
-            day_start, day_end = market_day_window(day)
-            response = client.transmission_unavailability(
-                *DIRECTION, day_start, day_end
-            )
-            curves_by_day[day] = (
-                [] if response.is_empty else parse_outages_response(response)
-            )
-        assets = binding_assets(
-            curves_by_day[day],
-            pd.Timestamp(episode["start_utc"]).to_pydatetime(),
-            pd.Timestamp(episode["end_utc"]).to_pydatetime(),
-            published_before=pd.Timestamp(episode["start_utc"]).to_pydatetime(),
-            direction=DIRECTION,
-        )
-
-        sheet = episode_facts(episode, window, assets or None)
+        try:
+            sheet = build_sheet(episode)
+        except EvidenceUnavailable as exc:
+            print(f"{episode['episode_key']}   SKIPPED, evidence unavailable")
+            print(f"    {exc}\n")
+            skipped.append(episode["episode_key"])
+            continue
 
         print("=" * 72)
         print(f"{episode['episode_key']}   {sheet.subject}")
@@ -239,13 +228,24 @@ def main() -> int:
         # were different shapes in the same file.
         records.append(to_record(episode["episode_key"], result, sheet, truth))
 
+        # Written as each one arrives, merged, never overwritten. Writing only
+        # at the end lost a paid-for Opus explanation when the next episode's
+        # evidence fetch failed, and at forty-eight model calls a crash near
+        # the end would lose nearly all of them.
+        write_records(out_path, merge(already, records))
+
+    if skipped:
+        # Named rather than counted, and as a command, because a re-run with
+        # --all would repeat every episode, and a re-run without it would skip
+        # these too whenever an older record for them is already on file.
+        print(f"\n{len(skipped)} episode(s) skipped because their evidence could "
+              "not be retrieved. Nothing was written for them. To retry just those:")
+        wanted = " ".join(f"--episode {key}" for key in skipped)
+        print(f"  python scripts/explain_episodes.py {wanted} "
+              f"--endpoint {args.endpoint} --out {args.out}\n")
+
     if args.dry_run or not records:
         return 0
-
-    # Merged, never overwritten. An incremental run produces two or three
-    # records, and writing those alone would delete the other hundred and
-    # twenty-three.
-    write_records(out_path, merge(already, records))
 
     # Recorded after the file is written, so the artifact logged is the one on
     # disk rather than a second serialisation that could differ from it.
@@ -276,15 +276,16 @@ def main() -> int:
     print(f"Grounded explanations: {grounded} of {len(records)}"
           f"  ({grounded / len(records):.0%})")
     print(f"  passed without a retry: {first_try}")
+    if skipped:
+        print(f"  skipped, evidence unavailable, not counted above: {len(skipped)}")
     if grounded < len(records):
         print("\n  Failures, which are the interesting rows:")
         for record in records:
             if not record["grounded"]:
-                reason = (
-                    ", ".join(record["unsupported"])
-                    if record["unsupported"]
-                    else "no source named"
-                )
+                reasons = list(record["unsupported"]) + [
+                    f"date {text}" for text in record.get("wrong_dates", [])
+                ]
+                reason = ", ".join(reasons) if reasons else "no source named"
                 print(f"    {record['episode_key']}: {reason}")
 
     print(f"\nHuman labelled episodes in this run: {len(labelled)}")

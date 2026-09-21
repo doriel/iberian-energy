@@ -199,6 +199,16 @@ if todo.empty:
 # COMMAND ----------
 
 fresh: list[dict] = []
+skipped: list[str] = []
+
+
+def _skip(key, exc):
+    # An episode whose evidence could not be fetched gets no record, so it is
+    # still pending tomorrow. Treating the failure as "no notices" would
+    # publish a false statement that passes verification.
+    skipped.append(key)
+    print(f"  {key}  SKIPPED, evidence unavailable: {exc}")
+
 
 if not todo.empty:
     client = EntsoeClient(Settings.from_env().require_entsoe_token())
@@ -216,6 +226,7 @@ if not todo.empty:
             f"  {key}  {'grounded' if result.ok else 'REJECTED'}  "
             f"attempt {result.attempts}"
         ),
+        on_skip=_skip,
     ):
         fresh.append(record)
         write_records(EXPLANATIONS, merge(already, fresh))
@@ -282,5 +293,6 @@ else:
 # COMMAND ----------
 
 dbutils.notebook.exit(
-    f"{grounded}/{len(fresh)} new grounded | {total} on file"
+    f"{grounded}/{len(fresh)} new grounded | {len(skipped)} skipped, still pending "
+    f"| {total} on file"
 )
