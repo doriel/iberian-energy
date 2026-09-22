@@ -161,6 +161,7 @@ src/iberian/
   agent/tracing.py               MLflow spans, or a no-op where MLflow is absent
   agent/experiment.py            one evaluation run: params, metrics, artifact
   agent/table.py                 the explanations as a table, typed and commented
+  agent/notices.py               A78 notices as table rows, and as searchable text
   publish/dashboard.py           gold tables -> the published JSON, either source
   publish/github.py              commit a built file over the contents API
 agents/
@@ -202,7 +203,7 @@ python -m pytest tests/ -q
 python scripts/run_market_splitting.py --demo
 ```
 
-286 tests, under five seconds, no network and no credentials. The demo plants two
+298 tests, under five seconds, no network and no credentials. The demo plants two
 known splits in a synthetic week, so the output is verifiable by eye before real
 data arrives.
 

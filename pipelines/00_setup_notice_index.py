@@ -44,11 +44,13 @@ dbutils.widgets.text("catalog", "bootcamp_students", "Catalog")
 dbutils.widgets.text("schema", "doriel", "Schema")
 dbutils.widgets.text("endpoint", "zachy_vs", "Vector Search endpoint")
 dbutils.widgets.text("embedding_model", "databricks-gte-large-en", "Embedding model")
+dbutils.widgets.dropdown("recreate_index", "no", ["no", "yes"], "Recreate the index")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 ENDPOINT = dbutils.widgets.get("endpoint")
 EMBEDDING_MODEL = dbutils.widgets.get("embedding_model")
+RECREATE = dbutils.widgets.get("recreate_index") == "yes"
 
 TABLE = f"{CATALOG}.{SCHEMA}.gold_transmission_notices"
 INDEX = f"{TABLE}_index"
@@ -76,7 +78,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
   asset_named        BOOLEAN COMMENT 'False when the notice carries no asset block at all',
   status             STRING  COMMENT 'planned or unplanned',
   business_type      STRING  COMMENT 'A53 planned maintenance or A54 unplanned outage',
-  min_available_mw   DOUBLE  COMMENT 'Lowest capacity that remains AVAILABLE on the asset during the notice',
+  min_available_mw   DOUBLE  COMMENT 'Lowest capacity that remains AVAILABLE on the asset across the whole notice',
+  breakpoints_json   STRING  COMMENT 'The availability step function as JSON, [[epoch, mw], ...]. The lowest capacity inside an episode window is computed from this, not from min_available_mw',
   published_at       TIMESTAMP,
   outage_start       TIMESTAMP,
   outage_end         TIMESTAMP
@@ -84,6 +87,18 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 COMMENT 'ENTSO-E A78 transmission unavailability notices, the source of the notice vector index. Written by a Job task, not by the declarative pipeline.'
 TBLPROPERTIES (delta.enableChangeDataFeed = true)
 """)
+
+# Added after the index existed. An existing table keeps its rows and gains the
+# column; the index has to be recreated to see it, which is what `recreate_index`
+# is for.
+existing = {field.name for field in spark.table(TABLE).schema.fields}
+if "breakpoints_json" not in existing:
+    spark.sql(f"ALTER TABLE {TABLE} ADD COLUMN breakpoints_json STRING")
+    spark.sql(
+        f"ALTER TABLE {TABLE} ALTER COLUMN breakpoints_json COMMENT "
+        "'The availability step function as JSON, [[epoch, mw], ...]'"
+    )
+    print(f"{TABLE}: breakpoints_json added")
 
 rows = spark.table(TABLE).count()
 if rows == 0:
@@ -117,7 +132,19 @@ try:
 except TypeError:
     client = Client()
 
+if RECREATE:
+    # Delete and create in the same cell, deliberately. The endpoint has a
+    # limit of 50 indexes and has been full once, so the slot should not be
+    # left free for longer than this takes.
+    try:
+        client.delete_index(endpoint_name=ENDPOINT, index_name=INDEX)
+        print(f"{INDEX}: deleted, recreating")
+    except Exception as exc:
+        print(f"{INDEX}: nothing to delete ({type(exc).__name__})")
+
 try:
+    if RECREATE:
+        raise LookupError("recreate requested")
     index = client.get_index(endpoint_name=ENDPOINT, index_name=INDEX)
     print(f"{INDEX}: already exists, left alone")
 except Exception:

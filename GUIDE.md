@@ -51,6 +51,7 @@ src/iberian/
     experiment.py                  an evaluation run, as an MLflow run
     batch.py                       which episodes need explaining, and merging
     table.py                       the explanations as a typed, commented table
+    notices.py                     A78 notices as rows of the notice table
   publish/
     dashboard.py                   gold tables to the published JSON
     github.py                      commit a built file over the contents API
@@ -136,7 +137,7 @@ export $(grep -v '^#' .env | xargs)
 ### Start here
 
 ```bash
-python -m pytest tests/ -q          # 286 tests, no network, under five seconds
+python -m pytest tests/ -q          # 298 tests, no network, under five seconds
 python scripts/run_market_splitting.py --demo   # whole pipeline, synthetic data
 python scripts/explore.py tables    # what the last run produced
 ```

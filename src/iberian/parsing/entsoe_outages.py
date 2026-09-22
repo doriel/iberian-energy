@@ -40,6 +40,39 @@ BUSINESS_TYPE_LABELS = {
 }
 
 
+def capacity_at(points, ts: datetime) -> float | None:
+    """The value of a step function at an instant: it holds until the next point.
+
+    Module level because the notice table carries the same step function into
+    Delta, and the vector path has to read it back the same way the direct path
+    reads it here. Two implementations of "which asset was tightest" would
+    disagree eventually, and the disagreement would look like a finding.
+    """
+    if not points:
+        return None
+    stamps = [point[0] for point in points]
+    index = bisect.bisect_right(stamps, ts) - 1
+    if index < 0:
+        return None
+    return points[index][1]
+
+
+def minimum_capacity(
+    points, start: datetime, end: datetime, at_start: float | None = None
+) -> float | None:
+    """Tightest capacity across a window, which is what binds an interval.
+
+    The value at `start` counts even though its breakpoint is earlier: a step
+    function holds, so that is the capacity when the window opens.
+    """
+    values = [value for stamp, value in points if start <= stamp < end]
+    if at_start is None:
+        at_start = capacity_at(points, start)
+    if at_start is not None:
+        values.append(at_start)
+    return min(values) if values else None
+
+
 @dataclass(frozen=True)
 class OutageCurve:
     """One asset's available capacity as a step function."""
@@ -58,6 +91,11 @@ class OutageCurve:
     resolution_minutes: int
     # Sorted breakpoints: the capacity holds until the next one.
     breakpoints: list[tuple[datetime, float]] = field(default_factory=list)
+    # The TimeSeries identifier. The document identifies a publication, this
+    # identifies which notice inside it, and together with the period start
+    # they make a key that stays stable when a notice is republished as its
+    # own document.
+    series_mrid: str | None = None
 
     @property
     def status(self) -> str:
@@ -72,25 +110,15 @@ class OutageCurve:
 
     def capacity_at(self, ts: datetime) -> float | None:
         """Available capacity at an instant, or None outside the window."""
-        if not self.covers(ts) or not self.breakpoints:
+        if not self.covers(ts):
             return None
-        stamps = [point[0] for point in self.breakpoints]
-        index = bisect.bisect_right(stamps, ts) - 1
-        if index < 0:
-            return None
-        return self.breakpoints[index][1]
+        return capacity_at(self.breakpoints, ts)
 
     def minimum_between(self, start: datetime, end: datetime) -> float | None:
         """Tightest capacity across a window, which is what binds an interval."""
-        values = [
-            value
-            for stamp, value in self.breakpoints
-            if start <= stamp < end
-        ]
-        at_start = self.capacity_at(start)
-        if at_start is not None:
-            values.append(at_start)
-        return min(values) if values else None
+        return minimum_capacity(
+            self.breakpoints, start, end, at_start=self.capacity_at(start)
+        )
 
 
 def parse_transmission_outages(xml_body: str) -> list[OutageCurve]:
@@ -106,6 +134,7 @@ def parse_transmission_outages(xml_body: str) -> list[OutageCurve]:
 
     for series in _findall(root, "TimeSeries"):
         business_type = _text(_find(series, "businessType"))
+        series_mrid = _text(_find(series, "mRID"))
         in_domain = _text(_find(series, "in_Domain.mRID"))
         out_domain = _text(_find(series, "out_Domain.mRID"))
 
@@ -171,6 +200,7 @@ def parse_transmission_outages(xml_body: str) -> list[OutageCurve]:
                     end_utc=end,
                     resolution_minutes=step,
                     breakpoints=breakpoints,
+                    series_mrid=series_mrid,
                 )
             )
 
