@@ -624,3 +624,48 @@ def test_generated_text_is_checked_against_a_real_assembled_sheet():
 
     invented = honest.replace("3,195 MW", "2,400 MW")
     assert not verify(invented, facts).ok
+
+
+def build_assets(**overrides) -> list[dict]:
+    """Two notices, both in force, reporting the same remaining capacity."""
+    first = {
+        "asset": "Alcochete-Palmela",
+        "asset_named": True,
+        "status": "planned",
+        "available_mw": 2800.0,
+        "published_at": datetime(2026, 8, 9, 17, 13, tzinfo=timezone.utc),
+    }
+    second = dict(first, asset="AT 3 400/220 SRM")
+    second.update(overrides)
+    return [first, second]
+
+
+def test_a_tie_on_capacity_is_stated_rather_than_hidden():
+    """Naming one asset as the constraint when several tie is an overclaim.
+
+    Found by comparing the two retrieval paths: they named different assets at
+    identical megawatts on fifty-one of fifty-nine episodes. The sort now breaks
+    the tie the same way everywhere, which makes the answer reproducible. It
+    does not make that asset the cause, and the sheet has to say so.
+    """
+    facts = episode_facts(build_episode(), build_intervals(), build_assets())
+
+    assert facts.get("notices_at_the_lowest_capacity").value == 2
+    assert any("not singled out" in caveat for caveat in facts.caveats)
+
+
+def test_a_single_notice_gets_no_tie_caveat():
+    # The caveat has to be absent when the evidence really does point at one
+    # asset, or it becomes noise the model learns to ignore.
+    facts = episode_facts(build_episode(), build_intervals(), build_assets()[:1])
+
+    assert facts.get("notices_at_the_lowest_capacity") is None
+    assert not any("not singled out" in caveat for caveat in facts.caveats)
+
+
+def test_notices_that_differ_in_capacity_are_not_a_tie():
+    assets = build_assets(available_mw=3300.0)
+    facts = episode_facts(build_episode(), build_intervals(), assets)
+
+    assert facts.get("constrained_asset").value == "Alcochete-Palmela"
+    assert facts.get("notices_at_the_lowest_capacity") is None

@@ -160,6 +160,43 @@ def test_the_tightest_asset_is_first_on_both_paths():
     assert through_index(curves)[0]["asset"] == "Cedillo-Falagueira"
 
 
+def test_two_notices_at_the_same_capacity_pick_the_same_one_on_both_paths():
+    """The fifty-one disagreements that were not a retrieval finding.
+
+    Several notices routinely report the same remaining capacity for the same
+    window. Sorting on the capacity alone left the winner to arrival order, and
+    the two paths arrive in different orders: the platform's document order on
+    one side, the similarity ranking on the other.
+    """
+    twin = curve(
+        document_mrid="doc-6",
+        series_mrid="series-6",
+        asset_mrid="asset-6",
+        asset_name="Zamora-Sines",
+        breakpoints=[(DAY, 900.0)],
+    )
+    curves = [curve(), twin]
+
+    assert through_index(curves)[0]["asset"] == direct(curves)[0]["asset"]
+    # And the order does not depend on which way round they were seen.
+    assert through_index(list(reversed(curves)))[0]["asset"] == direct(curves)[0]["asset"]
+
+
+def test_a_tie_is_broken_towards_the_notice_that_names_its_asset():
+    # Arbitrary either way on the capacity, so it goes to the one an
+    # explanation can actually point at.
+    anonymous = curve(
+        document_mrid="doc-7",
+        series_mrid="series-7",
+        asset_name=None,
+        asset_mrid=None,
+        breakpoints=[(DAY, 900.0)],
+    )
+    curves = [anonymous, curve()]
+    assert direct(curves)[0]["asset"] == "Alcochete-Palmela"
+    assert through_index(curves)[0]["asset"] == "Alcochete-Palmela"
+
+
 def test_an_unidentified_asset_reads_the_same_on_both_paths():
     """The placeholder label has to match, or the fact sheet branches wrongly."""
     curves = [curve(asset_name=None, asset_mrid=None)]

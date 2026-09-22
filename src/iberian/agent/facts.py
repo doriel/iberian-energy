@@ -326,6 +326,26 @@ def episode_facts(
             "ENTSO-E A78, published before the episode began",
             "a count only: these notices were published on different dates")
 
+        # Several notices reporting the same remaining capacity is the normal
+        # case, not the exception: comparing the two retrieval paths found it on
+        # fifty-one of fifty-nine episodes. The sort now breaks the tie the same
+        # way everywhere, so the asset above is reproducible, but reproducible
+        # is not the same as responsible. Without this the explanation names one
+        # asset as the constraint when the evidence does not single it out.
+        lowest = tightest.get("available_mw")
+        tied = sum(1 for row in assets if row.get("available_mw") == lowest)
+        if tied > 1:
+            add("notices_at_the_lowest_capacity", tied, "notices",
+                "ENTSO-E A78, published before the episode began",
+                "how many notices report this same remaining capacity, the "
+                "asset above being only the first of them")
+            caveats.append(
+                "More than one notice reports this same remaining capacity, so "
+                "the asset above is not singled out by the evidence. Attribute "
+                "the restriction to the notices in force, and name that asset "
+                "only as one of them."
+            )
+
         # Named for the one notice it belongs to. As `notice_published`, beside
         # a count of every notice in force, models wrote "nine notices were in
         # force, published on 13 August", attaching one notice's date to all

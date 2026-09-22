@@ -42,7 +42,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from iberian.agent.notices import breakpoints_from_json
-from iberian.parsing.entsoe_outages import minimum_capacity
+from iberian.parsing.entsoe_outages import binding_order, minimum_capacity
 
 #: What comes back from the index. `text` is not among them: the agent is given
 #: facts, not prose it might copy, and the row's own fields are what the fact
@@ -190,7 +190,7 @@ def assets_from_rows(rows: list[dict], start: datetime, end: datetime) -> list[d
                 "notice_id": row.get("notice_id"),
             }
         )
-    out.sort(key=lambda row: row["available_mw"])
+    out.sort(key=binding_order)
     return out
 
 

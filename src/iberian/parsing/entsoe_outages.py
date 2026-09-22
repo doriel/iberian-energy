@@ -215,6 +215,36 @@ def parse_outages_response(response) -> list[OutageCurve]:
     return curves
 
 
+def binding_order(row: dict) -> tuple:
+    """How "tightest first" is decided, for both retrieval paths.
+
+    Sorting on the capacity alone is not enough, and the comparison of the two
+    paths is what showed it: several notices routinely report the same remaining
+    capacity for the same window, and a plain sort then leaves the winner to
+    whatever order the rows arrived in. The direct path got the transparency
+    platform's document order and the vector path got the similarity ranking, so
+    the two named different assets for the same episode, at the same megawatts,
+    fifty-one times out of fifty-nine. That looked like a retrieval finding and
+    was a missing tie break.
+
+    A tie is broken towards a notice that names its asset, because an
+    explanation that can say where the restriction is beats one that cannot and
+    the capacity is the same either way, and then alphabetically, which is
+    arbitrary but identical everywhere it runs. A tie is not hidden: the fact
+    sheet counts how many notices sit at the lowest capacity and tells the model
+    not to present the first as the single cause.
+
+    Module level because the notice table carries these rows into Delta and the
+    vector path sorts them again on the way out. Two orderings would disagree
+    eventually, and the disagreement would look like a finding.
+    """
+    return (
+        row["available_mw"],
+        not row.get("asset_named", True),
+        row.get("asset") or "",
+    )
+
+
 def binding_assets(
     curves: list[OutageCurve],
     start: datetime,
@@ -262,7 +292,7 @@ def binding_assets(
             }
         )
 
-    rows.sort(key=lambda row: row["available_mw"])
+    rows.sort(key=binding_order)
     return rows
 
 
