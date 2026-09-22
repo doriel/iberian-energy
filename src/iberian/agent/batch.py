@@ -156,7 +156,14 @@ def explain_episodes(
         yield record
 
 
-def sheet_builder(client, intervals: pd.DataFrame, direction, parse, binding):
+def sheet_builder(
+    client,
+    intervals: pd.DataFrame,
+    direction,
+    parse,
+    binding,
+    fetch_curves: bool = True,
+):
     """A `build_sheet` that retrieves the A78 notices for an episode's day.
 
     Factored out of the two callers rather than written twice. The script and
@@ -170,6 +177,15 @@ def sheet_builder(client, intervals: pd.DataFrame, direction, parse, binding):
     `parse` and `binding` are passed in rather than imported so this module
     keeps no dependency on the parsing package, and so a test can drive the
     whole loop without an HTTP client.
+
+    `fetch_curves=False` skips the network call entirely and hands `binding` an
+    empty list. That is for a binding that reads the notices from somewhere
+    else, the vector index being the one that exists: fetching them anyway
+    would keep the dependency this project is measuring the cost of, and would
+    make a run fail on an API outage that the index path is supposed to
+    survive. It is a real behavioural difference between the two paths, not a
+    detail: the direct path is always current and needs the platform to be up,
+    the index path needs neither.
     """
     from iberian.market_time import market_day_window
 
@@ -182,6 +198,8 @@ def sheet_builder(client, intervals: pd.DataFrame, direction, parse, binding):
         ]
 
         day = episode["market_day"]
+        if not fetch_curves:
+            curves_by_day[day] = []
         if day not in curves_by_day:
             day_start, day_end = market_day_window(day)
             try:

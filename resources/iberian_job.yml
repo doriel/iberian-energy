@@ -137,6 +137,12 @@ resources:
               # model calls inside a task expected to take seconds. The backlog
               # is printed and picked up the next day.
               max_new: "25"
+              # Stated rather than left to the notebook default, so the Job says
+              # which retrieval path production uses. The index is only as fresh
+              # as its last sync, and the fifteen minute claim does not survive a
+              # retrieval path that can be a day behind. `vector` is for the
+              # comparison in 99_evaluate_retrieval.
+              notice_retrieval: "direct"
           environment_key: Default
 
           # Not retried. Each attempt costs model calls, and a partial run has

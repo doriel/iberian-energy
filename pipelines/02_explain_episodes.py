@@ -24,7 +24,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install requests pandas
+# MAGIC %pip install requests pandas databricks-ai-search
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -38,6 +38,10 @@ dbutils.widgets.text("secret_scope", "iberian", "Secret scope")
 dbutils.widgets.text("endpoint", "databricks-claude-haiku-4-5", "Serving endpoint")
 dbutils.widgets.text("max_new", "25", "Most episodes to explain in one run")
 dbutils.widgets.dropdown("rebuild", "no", ["no", "yes"], "Re-explain everything")
+dbutils.widgets.dropdown(
+    "notice_retrieval", "direct", ["direct", "vector"], "Where the A78 notices come from"
+)
+dbutils.widgets.text("vector_endpoint", "zachy_vs", "Vector Search endpoint")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
@@ -46,6 +50,8 @@ SCOPE = dbutils.widgets.get("secret_scope")
 ENDPOINT = dbutils.widgets.get("endpoint")
 MAX_NEW = int(dbutils.widgets.get("max_new"))
 REBUILD = dbutils.widgets.get("rebuild") == "yes"
+RETRIEVAL = dbutils.widgets.get("notice_retrieval")
+VECTOR_ENDPOINT = dbutils.widgets.get("vector_endpoint")
 
 #: Where the explanations live between tasks, and between days.
 EXPLANATIONS = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/agent/explanations.jsonl"
@@ -213,8 +219,49 @@ def _skip(key, exc):
 if not todo.empty:
     client = EntsoeClient(Settings.from_env().require_entsoe_token())
     complete = databricks_completer(endpoint=ENDPOINT)
+
+    if RETRIEVAL == "vector":
+        # Reads the notices from `gold_transmission_notices_index` instead of
+        # the transparency platform, and does not call the platform at all.
+        #
+        # Not the default, and the evaluation is why. The index is only as
+        # fresh as its last sync: a notice published between the load task and
+        # this one is invisible to it, and that was observed rather than
+        # imagined, on an episode whose binding notice was published ninety
+        # seconds before the episode began. The north star is an explanation
+        # within fifteen minutes of publication, and a retrieval path that can
+        # be a day behind does not belong on the critical path of that claim.
+        #
+        # It stays available because it is what the comparison in
+        # `99_evaluate_retrieval` runs against, and because it is the path that
+        # survives the platform being down.
+        from iberian.agent.retrieval import binding_from_index  # noqa: E402
+
+        try:
+            from databricks.ai_search.client import AISearchClient as Client
+        except ImportError:
+            from databricks.vector_search.client import VectorSearchClient as Client
+        try:
+            search = Client(disable_notice=True)
+        except TypeError:
+            search = Client()
+
+        index_name = f"{CATALOG}.{SCHEMA}.gold_transmission_notices_index"
+        binding = binding_from_index(
+            search.get_index(endpoint_name=VECTOR_ENDPOINT, index_name=index_name)
+        )
+        print(f"notices from {index_name} on {VECTOR_ENDPOINT}")
+    else:
+        binding = binding_assets
+        print("notices from the ENTSO-E transparency platform")
+
     build_sheet = sheet_builder(
-        client, intervals, DIRECTION, parse_outages_response, binding_assets
+        client,
+        intervals,
+        DIRECTION,
+        parse_outages_response,
+        binding,
+        fetch_curves=(RETRIEVAL != "vector"),
     )
 
     for record in explain_episodes(

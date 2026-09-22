@@ -368,3 +368,34 @@ def test_a_skipped_episode_is_still_pending_next_time():
     written = [{"episode_key": "2026-08-19T0730", "grounded": True}]
     remaining = pending(frame, written)
     assert [episode_key(row) for _, row in remaining.iterrows()] == ["2026-08-18T0745"]
+
+
+def test_the_vector_path_does_not_call_the_transparency_platform():
+    """The difference that makes the index path worth having at all.
+
+    If it fetched the notices anyway it would keep the dependency, and a run
+    would still fail on an API outage that reading from the index is supposed
+    to survive. The evaluation's freshness finding is only meaningful if the
+    two paths really do read from different places.
+    """
+    client = FakeClient()
+    seen = {}
+
+    def binding(curves, start, end, published_before=None, direction=None):
+        seen["curves"] = curves
+        return []
+
+    frame = episodes("2026-08-18T0745", "2026-08-19T0730")
+    build = sheet_builder(
+        client,
+        intervals_for("2026-08-18T0745", "2026-08-19T0730"),
+        ("ES", "PT"),
+        parse=lambda response: [],
+        binding=binding,
+        fetch_curves=False,
+    )
+    for _, episode in frame.iterrows():
+        build(episode)
+
+    assert client.days == [], "the platform was called on the index path"
+    assert seen["curves"] == [], "the binding gets nothing, and asks the index"
