@@ -132,13 +132,47 @@ try:
 except TypeError:
     client = Client()
 
+def create_index():
+    """Create, retrying while the old index is still being deleted.
+
+    Deletion is asynchronous and the API refuses any operation on an index in
+    PENDING_DELETE. Whether `get_index` keeps succeeding during that window was
+    not verified, so the wait is driven by the create call itself, which is the
+    operation that actually has to succeed.
+    """
+    for attempt in range(60):
+        try:
+            return client.create_delta_sync_index(
+                endpoint_name=ENDPOINT,
+                source_table_name=TABLE,
+                index_name=INDEX,
+                pipeline_type="TRIGGERED",
+                primary_key="notice_id",
+                embedding_source_column="text",
+                embedding_model_endpoint_name=EMBEDDING_MODEL,
+            )
+        except Exception as exc:
+            if "pending deletion" not in str(exc).lower():
+                raise
+            if attempt == 0:
+                print(f"{INDEX}: still being deleted, waiting")
+            time.sleep(10)
+    raise RuntimeError(
+        f"{INDEX} was still pending deletion after 10 minutes. "
+        "Wait and run this notebook again with recreate_index=yes."
+    )
+
+
 if RECREATE:
     # Delete and create in the same cell, deliberately. The endpoint has a
     # limit of 50 indexes and has been full once, so the slot should not be
     # left free for longer than this takes.
+    #
+    # Deletion is asynchronous. Creating straight after the delete call fails
+    # with "currently pending deletion", so wait for it to actually disappear.
     try:
         client.delete_index(endpoint_name=ENDPOINT, index_name=INDEX)
-        print(f"{INDEX}: deleted, recreating")
+        print(f"{INDEX}: delete requested")
     except Exception as exc:
         print(f"{INDEX}: nothing to delete ({type(exc).__name__})")
 
@@ -148,15 +182,7 @@ try:
     index = client.get_index(endpoint_name=ENDPOINT, index_name=INDEX)
     print(f"{INDEX}: already exists, left alone")
 except Exception:
-    index = client.create_delta_sync_index(
-        endpoint_name=ENDPOINT,
-        source_table_name=TABLE,
-        index_name=INDEX,
-        pipeline_type="TRIGGERED",
-        primary_key="notice_id",
-        embedding_source_column="text",
-        embedding_model_endpoint_name=EMBEDDING_MODEL,
-    )
+    index = create_index()
     print(f"{INDEX}: created on {ENDPOINT}")
 
 for _ in range(60):
