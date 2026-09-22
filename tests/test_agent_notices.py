@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from iberian.agent.notices import (  # noqa: E402
+    COLUMN_TYPES,
     COLUMNS,
     breakpoints_from_json,
     notice_id,
@@ -94,6 +95,15 @@ def test_the_same_notice_seen_on_many_days_is_one_row():
 def test_every_row_has_every_column_in_order():
     for row in notice_rows([curve()]):
         assert tuple(row) == COLUMNS
+
+
+def test_the_declared_types_cover_exactly_the_columns():
+    """The Spark schema cannot be built here, so this is what guards it.
+
+    A column added to `COLUMNS` and forgotten here would reach the cluster as a
+    MERGE that fails on a schema mismatch, which is a slow way to find out.
+    """
+    assert tuple(COLUMN_TYPES) == COLUMNS
 
 
 def test_the_epochs_match_the_timestamps():

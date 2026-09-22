@@ -48,6 +48,12 @@ variables:
       A variable rather than a constant so a model can be compared without
       editing a notebook.
     default: databricks-claude-haiku-4-5
+  vector_search_endpoint:
+    description: >-
+      Shared Vector Search endpoint the notice index lives on. Shared with the
+      rest of the boot camp and capped at 50 indexes, so the name is a variable:
+      if the class fills it again, the index moves without editing a notebook.
+    default: zachy_vs
   github_repo:
     description: >-
       owner/repo for the publish task's contents API call. Not derived from

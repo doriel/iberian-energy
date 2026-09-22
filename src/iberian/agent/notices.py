@@ -161,6 +161,52 @@ COLUMNS: tuple[str, ...] = (
 )
 
 
+#: Column name to Spark type name, in the order the table declares them. Kept
+#: as names rather than as type objects so this module stays importable without
+#: PySpark, which is the rule the whole library follows: the test suite must not
+#: need a cluster. A test asserts these keys are exactly `COLUMNS`.
+COLUMN_TYPES: dict[str, str] = {
+    "notice_id": "StringType",
+    "text": "StringType",
+    "published_epoch": "LongType",
+    "outage_start_epoch": "LongType",
+    "outage_end_epoch": "LongType",
+    "out_domain": "StringType",
+    "in_domain": "StringType",
+    "asset": "StringType",
+    "asset_named": "BooleanType",
+    "status": "StringType",
+    "business_type": "StringType",
+    "min_available_mw": "DoubleType",
+    "breakpoints_json": "StringType",
+    "published_at": "TimestampType",
+    "outage_start": "TimestampType",
+    "outage_end": "TimestampType",
+}
+
+
+def spark_schema():
+    """The Spark schema, built only when Spark is present.
+
+    Explicit rather than inferred: a window with no unnamed assets and no
+    missing capacities would otherwise produce null typed columns, and the
+    MERGE into a table that declares BOOLEAN and DOUBLE would fail on a day
+    that has nothing unusual in it.
+
+    Only `notice_id` is non nullable, matching the table.
+    """
+    from pyspark.sql import types
+
+    return types.StructType(
+        [
+            types.StructField(
+                column, getattr(types, kind)(), column != "notice_id"
+            )
+            for column, kind in COLUMN_TYPES.items()
+        ]
+    )
+
+
 def notice_rows(curves: Iterable) -> list[dict]:
     """One row per notice, de-duplicated by id, newest publication last.
 

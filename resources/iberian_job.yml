@@ -1,7 +1,7 @@
 # The daily run: fetch what is new, rebuild the tables, explain what is new in
 # them, and publish the result.
 #
-# Four tasks rather than one, and the splits are the ones the code already
+# Five tasks rather than one, and the splits are the ones the code already
 # makes. The ingest notebook calls the APIs and lands payloads in the Volume.
 # The declarative pipeline reads the Volume and owns every table. The explain
 # task calls a model for the episodes that have no explanation yet. The publish
@@ -9,8 +9,14 @@
 # HTTP request never sits inside a unit of work the platform is entitled to
 # retry, and a model call never sits inside one either.
 #
-# The three notebooks are numbered in run order, which is why the publish
-# notebook is 03 rather than 02.
+# load_notices is the fifth, and it deliberately sits off the path to publish.
+# It lands the A78 notices in a table and syncs the vector index; nothing
+# downstream reads that index yet, so a failure there marks the run failed
+# without stopping the explanations from being published.
+#
+# The notebooks are numbered in run order, which is why the publish notebook is
+# 03 rather than 02, and why the new one is 01b rather than a renumbering of the
+# two that the Job, the bundle and the docs already point at.
 
 resources:
   jobs:
@@ -77,6 +83,32 @@ resources:
 
           # Ingestion takes about two minutes. Ten is not a failure, it is a
           # warning that something upstream is crawling.
+          timeout_seconds: 1800
+
+        - task_key: load_notices
+          depends_on:
+            - task_key: ingest
+          notebook_task:
+            notebook_path: pipelines/01b_load_notices
+            source: GIT
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              secret_scope: ${var.secret_scope}
+              endpoint: ${var.vector_search_endpoint}
+              # Same trailing window as ingest, and for the same reason:
+              # ENTSO-E republishes corrected notices. A republication is a new
+              # document, so it lands as a new row rather than replacing the
+              # old one, which is what keeps the point in time filter honest.
+              days: "3"
+          environment_key: Default
+
+          # After ingest rather than beside it, so two tasks are not hitting a
+          # rate limited public API at once. It does not depend on transform:
+          # the notices come from the platform, not from the medallion.
+          max_retries: 2
+          min_retry_interval_millis: 300000     # five minutes
+          retry_on_timeout: true
           timeout_seconds: 1800
 
         - task_key: transform
