@@ -69,7 +69,7 @@ def interleave(frame: pd.DataFrame) -> list:
     return list(work.index)
 
 
-def show(row: pd.Series, position: int, total: int) -> None:
+def show(row: pd.Series, position: int, total: int, candidate: bool = False) -> None:
     print("\n" + "=" * 70)
     print(f"[{position}/{total}]  {row['episode_key']}   market day {row['market_day']}")
     print("=" * 70)
@@ -104,7 +104,21 @@ def show(row: pd.Series, position: int, total: int) -> None:
                 print(f"    Notice is {abs(gap):,.0f} MW tighter than the border figure,")
                 print("      which is normal: one asset among several parallel paths.")
 
-    print(f"\n  The rules would say: {row['candidate_cause']}")
+    # The rules' own answer is deliberately NOT shown before the question.
+    #
+    # It used to be, one line above the menu, and the first pass through this
+    # sheet agreed with it on every single episode. That is what anchoring
+    # does, and it is not a failure of attention: a proposed answer next to a
+    # menu reads as the answer, especially on the fortieth episode of a
+    # sitting. The result was a ground truth that was the system's own output
+    # wearing a different column name, which would have made the accuracy
+    # figure measure the system agreeing with itself.
+    #
+    # It is printed after the answer instead, where it is feedback rather than
+    # a suggestion, and `--show-candidate` puts it back for anyone who wants to
+    # review the rules rather than the episodes.
+    if candidate:
+        print(f"\n  The rules would say: {row['candidate_cause']}")
 
 
 def ask(row: pd.Series) -> tuple[str, str, str] | None:
@@ -145,6 +159,11 @@ def main() -> int:
     parser.add_argument("--all", action="store_true", help="include already labelled")
     parser.add_argument("--limit", type=int, help="stop after this many")
     parser.add_argument(
+        "--show-candidate",
+        action="store_true",
+        help="show the rules' answer before asking. Off by default: it anchors",
+    )
+    parser.add_argument(
         "--by-spread",
         action="store_true",
         help="largest spread first, rather than interleaving the strata",
@@ -174,13 +193,21 @@ def main() -> int:
 
     done = 0
     for position, index in enumerate(indices, 1):
-        show(sheet.loc[index], position, len(indices))
+        show(sheet.loc[index], position, len(indices), candidate=args.show_candidate)
         answer = ask(sheet.loc[index])
         if answer is None:
             break
         cause, confidence, notes = answer
         if not cause:
             continue
+
+        # After the answer, never before. Seeing where you differ from the
+        # rules is the useful part; seeing it first is the anchoring.
+        candidate = str(sheet.loc[index, "candidate_cause"])
+        if cause == candidate:
+            print(f"  (the rules agreed: {candidate})")
+        else:
+            print(f"  (the rules would have said {candidate}. Yours is the label.)")
 
         sheet.loc[index, "true_cause"] = cause
         sheet.loc[index, "confidence"] = confidence

@@ -35,7 +35,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install databricks-ai-search
+# MAGIC %pip install databricks-ai-search==0.78
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------

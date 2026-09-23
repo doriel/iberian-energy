@@ -34,7 +34,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install requests pandas databricks-ai-search
+# MAGIC %pip install requests pandas databricks-ai-search==0.78
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
