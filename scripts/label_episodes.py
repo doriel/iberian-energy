@@ -32,9 +32,10 @@ from pathlib import Path
 import pandas as pd
 
 CAUSES = [
-    ("saturation_planned", "Border at its limit, explained by a planned outage"),
-    ("saturation_unplanned", "Border at its limit, explained by an unplanned outage"),
-    ("saturation_no_notice", "Border at its limit, no notice accounts for it"),
+    ("saturation_planned", "Capacity unusually low, a planned outage is consistent"),
+    ("saturation_unplanned", "Capacity unusually low, an unplanned outage is consistent"),
+    ("saturation_no_notice", "Capacity unusually low, no notice accounts for it"),
+    ("saturation_ordinary_capacity", "Border full at ordinary capacity, nothing reduced it"),
     ("not_saturated", "Priced apart with headroom on the border"),
     ("threshold_artifact", "Spread at the rounding epsilon, not a real event"),
     ("unclear", "The available evidence does not settle it"),
@@ -86,6 +87,23 @@ def show(row: pd.Series, position: int, total: int, candidate: bool = False) -> 
     print(f"    Mean use      {row['mean_utilisation']}")
     print(f"    Min capacity  {row['min_capacity_mw']} MW")
 
+    # The comparison the sheet used to be missing. Without it there is no way
+    # to tell a border that was cut from a border that was merely full.
+    percentile = row.get("capacity_percentile")
+    if pd.notna(percentile) and str(percentile).strip():
+        percentile = float(percentile)
+        median = row.get("median_capacity_mw")
+        print(f"    Percentile    {percentile:.0f} of every quarter hour in the window")
+        if pd.notna(median) and str(median).strip():
+            print(f"                  (the median quarter hour is {float(median):,.0f} MW)")
+        if percentile < 10:
+            print("      Among the lowest capacities seen. Something took it away.")
+        elif percentile < 25:
+            print("      In the bottom quarter, so there is a reduction to explain.")
+        else:
+            print("      An ordinary level for this border. Nothing was taken away,")
+            print("      so no outage explains it: the border was simply full.")
+
     print("\n  Notices available before it began")
     if int(row["notices"]) == 0:
         print("    None. No transmission notice covers this interval in this direction.")
@@ -93,6 +111,14 @@ def show(row: pd.Series, position: int, total: int, candidate: bool = False) -> 
         print(f"    {int(row['notices'])} notice(s). Tightest:")
         print(f"      {row['tightest_asset']}  {row['tightest_available_mw']} MW  "
               f"{row['tightest_status']}, published {row['tightest_published']}")
+        share = row.get("notice_share_of_border")
+        if pd.notna(share) and str(share).strip():
+            share = float(share)
+            print(f"    That asset is {share:.0%} of the border figure.")
+            if share < 0.7:
+                print("      The border had roughly as much again elsewhere, so this")
+                print("      notice on its own did not set the limit.")
+
         gap = row.get("unexplained_mw")
         if pd.notna(gap):
             gap = float(gap)

@@ -47,13 +47,36 @@ from iberian.parsing.entsoe_outages import (  # noqa: E402
 #: twenty categories produces inconsistent labels, and every category here is
 #: one the available evidence can actually distinguish.
 CAUSES = {
-    "saturation_planned": "Border at its limit, explained by a planned outage notice",
-    "saturation_unplanned": "Border at its limit, explained by an unplanned outage",
-    "saturation_no_notice": "Border at its limit, no notice accounts for it",
+    "saturation_planned": "Capacity unusually low, a planned outage is consistent with it",
+    "saturation_unplanned": "Capacity unusually low, an unplanned outage is consistent",
+    "saturation_no_notice": "Capacity unusually low, no notice accounts for it",
+    "saturation_ordinary_capacity": "Border full at ordinary capacity, nothing reduced it",
     "not_saturated": "Priced apart with headroom on the border, cause unknown",
     "threshold_artifact": "Spread at the rounding epsilon, not a real event",
     "unclear": "The available evidence does not settle it",
 }
+
+#: Below this percentile of the window's own capacity distribution, the border
+#: was carrying unusually little and something reduced it. At or above it, the
+#: border was at an ordinary level and there is no reduction to explain.
+#:
+#: There is no published "normal" capacity for this border: the operator
+#: recomputes the net transfer capacity every day from the whole system state,
+#: and the observed values run from 210 to 7020 MW with no mode. A percentile of
+#: the window is the only reference the public data supports.
+#:
+#: The quartile rather than the median, because "unusually low" has to mean
+#: something. Half of all quarter hours are below the median by construction, so
+#: a median cut calls an utterly ordinary capacity a reduction. On the first
+#: sixty two episodes the choice moves twelve of them:
+#:
+#:     p25 -> 21 ordinary capacity, 32 outage consistent
+#:     p50 ->  8 ordinary capacity, 45 outage consistent
+#:
+#: One named constant rather than a figure buried in a condition, because it is
+#: a judgement about what "unusual" means and somebody should be able to find it
+#: and argue with it.
+ORDINARY_CAPACITY_PERCENTILE = 25.0
 
 LABEL_COLUMNS = ["true_cause", "confidence", "notes"]
 
@@ -64,18 +87,41 @@ DIRECTION = (EIC_SPAIN, EIC_PORTUGAL)
 def propose(row: pd.Series) -> str:
     """What the current rules would answer, so labelling is agree or disagree.
 
-    This is a candidate, never the label. Its value is that reviewing a
-    proposal is several times faster than writing one from scratch, and the
-    cases where a human disagrees are exactly the interesting ones.
+    This is a candidate, never the label. It is not shown to the labeller before
+    they answer, for reasons the labelling tool explains at length.
+
+    The order matters and follows the evidence rather than convenience. The
+    first version asked "is there a notice" before asking "was there anything to
+    explain", and so proposed `saturation_planned` for sixty of sixty two
+    episodes, including one where the border was at its 74th percentile and the
+    notice covered half of it. A notice sitting in the evidence is not a cause.
     """
     if row["peak_abs_spread"] <= 0.01:
         return "threshold_artifact"
     if row["share_saturated"] is None or pd.isna(row["share_saturated"]):
         return "unclear"
     if row["share_saturated"] < 0.5:
+        # Not expected to fire. Zones decouple because the interconnection
+        # binds, so a split with headroom would be a finding about the pipeline
+        # rather than about the market.
         return "not_saturated"
+
+    percentile = row.get("capacity_percentile")
+    if percentile is None or pd.isna(percentile):
+        return "unclear"
+    if percentile >= ORDINARY_CAPACITY_PERCENTILE:
+        # The border was full at a level it reaches routinely. Nothing was
+        # taken away, so no outage explains anything: the interconnection is
+        # simply smaller than the flow the price difference would justify.
+        return "saturation_ordinary_capacity"
+
     if row["notices"] == 0:
         return "saturation_no_notice"
+    if row["unexplained_mw"] is not None and not pd.isna(row["unexplained_mw"]):
+        if float(row["unexplained_mw"]) > 0:
+            # The notice permits more than the border carried, so whatever cut
+            # the capacity, it was not this.
+            return "saturation_no_notice"
     if row["tightest_status"] == "unplanned":
         return "saturation_unplanned"
     return "saturation_planned"
@@ -110,6 +156,33 @@ def main() -> int:
     episodes = episodes.sort_values("max_abs_spread", ascending=False)
     if args.limit:
         episodes = episodes.head(args.limit)
+
+    # The reference the sheet was missing, and without which the central
+    # question cannot be answered at all.
+    #
+    # "Does this outage explain the capacity" needs something to compare the
+    # capacity against, and this border has no published normal: the operator
+    # recalculates it daily and the values run from 210 to 7020 MW. What can be
+    # said is where a given figure sits among the others, so the reference is
+    # the window's own distribution.
+    #
+    # This is a relative measure and it is worth being honest about the limit:
+    # it says the border was carrying unusually little, not why.
+    capacity_series = intervals["capacity_mw"].dropna().to_numpy()
+    capacity_series.sort()
+
+    def capacity_percentile(value) -> float | None:
+        if value is None or pd.isna(value) or capacity_series.size == 0:
+            return None
+        return round(
+            float((capacity_series < float(value)).mean() * 100), 1
+        )
+
+    median_capacity = (
+        round(float(pd.Series(capacity_series).median()), 0)
+        if capacity_series.size
+        else None
+    )
 
     client = EntsoeClient(Settings.from_env().require_entsoe_token())
 
@@ -207,6 +280,26 @@ def main() -> int:
             )
         else:
             row["unexplained_mw"] = None
+
+        # Where this episode's capacity sits among every quarter hour in the
+        # window. Low means the border was carrying unusually little.
+        row["capacity_percentile"] = capacity_percentile(row["min_capacity_mw"])
+        row["median_capacity_mw"] = median_capacity
+
+        # How much of the border that one asset's remaining capacity amounts
+        # to. A ratio near 1 means the asset under notice is most of the
+        # border, so its outage plausibly set the limit. A ratio near 0.5 means
+        # the border had roughly as much again elsewhere, and that notice is
+        # not what constrained it.
+        #
+        # A heuristic, not physics: the border total is not the sum of the
+        # assets, and the operator's security assessment is not published.
+        if row["tightest_available_mw"] and row["min_capacity_mw"]:
+            row["notice_share_of_border"] = round(
+                float(row["tightest_available_mw"]) / float(row["min_capacity_mw"]), 2
+            )
+        else:
+            row["notice_share_of_border"] = None
 
         row["candidate_cause"] = propose(pd.Series(row))
         rows.append(row)
