@@ -168,8 +168,11 @@ def main() -> int:
     #
     # This is a relative measure and it is worth being honest about the limit:
     # it says the border was carrying unusually little, not why.
+    # Not sorted: the percentile below is the share of quarter hours under a
+    # value, which is a mean over a boolean mask and does not care about order.
+    # An earlier version sorted it in place and crashed, because `to_numpy`
+    # hands back a read-only view of pandas' own buffer.
     capacity_series = intervals["capacity_mw"].dropna().to_numpy()
-    capacity_series.sort()
 
     def capacity_percentile(value) -> float | None:
         if value is None or pd.isna(value) or capacity_series.size == 0:
