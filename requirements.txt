@@ -32,3 +32,19 @@ mlflow-skinny>=3.11.1
 # Tests. A third file for two lines costs more attention than it saves.
 pytest>=7.4
 numpy>=1.26
+
+# tests/test_app_routes.py drives the real application, so the test run needs
+# what the application needs. These arrive from requirements-app.txt on the
+# deploy host and are repeated here because CI's test job installs this file
+# and nothing else, and a route test that quietly skips is worse than no route
+# test: it reports green while the door it checks is unlatched.
+fastapi>=0.115,<1.0
+pydantic>=2.0,<3.0
+
+# Starlette's TestClient needs an HTTP client, and which one depends on the
+# Starlette that FastAPI pulls in. Current versions want httpx2 and say so;
+# Starlette 1.0 and earlier want plain httpx. Both are listed so the suite runs
+# either way, and the test module skips itself rather than erroring if neither
+# import works.
+httpx2>=0.1; python_version >= "3.9"
+httpx>=0.27

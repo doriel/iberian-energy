@@ -82,6 +82,12 @@ header { padding: 40px 0 8px; }
 h1 { font-size: clamp(26px, 4.4vw, 38px); line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.02em; }
 .standfirst { margin: 0; max-width: 62ch; color: var(--ink-2); font-size: 16px; }
 .meta { margin-top: 14px; font-size: 13px; color: var(--ink-muted); }
+.workbench-link { margin: 16px 0 0; font-size: 14px; }
+.workbench-link a {
+  color: var(--series-1); font-weight: 600; text-decoration: none;
+  border-bottom: 1px solid currentColor; padding-bottom: 1px;
+}
+.workbench-link span { display: block; margin-top: 4px; color: var(--ink-muted); font-size: 13px; }
 .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .theme {
   flex: none; background: var(--surface); color: var(--ink-2); cursor: pointer;
@@ -212,6 +218,11 @@ footer a { color: var(--ink-2); }
         came from.
       </p>
       <p class="meta" id="meta">Loading…</p>
+      <p class="workbench-link">
+        <a href="/workbench">Open the analyst workbench</a>
+        <span>Judge what caused an episode, set a price alert, or ask the agent.
+        Takes a name, no account.</span>
+      </p>
     </div>
     <button class="theme" id="theme" type="button">Dark</button>
   </div>

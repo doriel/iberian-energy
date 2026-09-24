@@ -19,8 +19,17 @@ application under load, and this one serves a handful of clicks an hour. A pool
 whose connections outlive the credential that opened them is a subtle bug, and
 adding one to avoid a few hundred milliseconds of connection setup would buy
 latency nobody can perceive at the cost of a failure mode that appears an hour
-after deployment. If the traffic ever justifies it, the endpoint already
-publishes a pooled host, which is what that host is for.
+after deployment.
+
+**Connect to the endpoint's own host, not the `-pooler` one.** The endpoint
+publishes both. The pooled host refuses this credential: every attempt returns
+`SASL authentication failed`, with a cached credential and with a freshly
+generated one alike, so the refusal is the handshake and not expiry. The
+unpooled host accepts the same credential from the same identity. Whether the
+pooler needs different connection parameters or simply does not accept a
+generated database credential, I did not establish, so treat it as unknown
+rather than as settled. Anyone reaching for the pooler later should expect to
+work that out first.
 
 Nothing here knows about episodes, alerts or labels. It opens connections, runs
 statements and records what happened. The operations live next door.

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIBEL workbench, who are you</title>
+<style>
+  :root {
+    --ink: #10151c; --muted: #5d6b7a; --line: #dfe5ec; --bg: #f6f8fa;
+    --card: #fff; --accent: #1b4d7a; --on-accent: #fff; --bad: #93221f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e6edf3; --muted: #9aa8b6; --line: #2a333d; --bg: #0f1419;
+      --card: #161c23; --accent: #7fb2e0; --on-accent: #0b1017; --bad: #e0736f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 16px; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  main { width: 100%; max-width: 440px; padding: 40px 0; }
+  h1 { font-size: 21px; margin: 0 0 6px; }
+  p.lede { color: var(--muted); margin: 0 0 22px; }
+  form {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 22px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 5px; }
+  input, button {
+    font: inherit; color: inherit; border-radius: 7px; padding: 10px 12px; width: 100%;
+  }
+  input { background: var(--bg); border: 1px solid var(--line); }
+  button {
+    background: var(--accent); color: var(--on-accent); border: 0; cursor: pointer;
+    font-weight: 600; margin-top: 14px;
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .plain {
+    font-size: 13px; color: var(--muted); margin: 16px 0 0;
+    border-top: 1px solid var(--line); padding-top: 14px;
+  }
+  .plain strong { color: var(--ink); font-weight: 600; }
+  .error { color: var(--bad); font-size: 14px; margin: 12px 0 0; }
+  .back { display: block; margin-top: 18px; font-size: 14px; color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>MIBEL workbench</h1>
+  <p class="lede">Judge what caused a market splitting episode, set a price alert,
+  or ask the agent. First, a name to put on your work.</p>
+
+  <form id="form" autocomplete="off">
+    <label for="name">Your name, or any name you want your entries filed under</label>
+    <input id="name" name="name" maxlength="60" required autofocus
+           placeholder="Ana Ferreira">
+    <button type="submit" id="go">Enter the workbench</button>
+    <p class="error" id="error" hidden></p>
+
+    <!-- Said on the page and not only in a comment. A visitor deciding whether
+         to type their real name is entitled to know what happens to it, and a
+         reviewer is entitled to see that this was never claimed to be more than
+         it is. -->
+    <p class="plain">
+      <strong>This is not a login.</strong> There is no password and nothing is
+      protected by the name you choose. It exists so that two people judging the
+      same episode produce two separate judgements instead of overwriting each
+      other's, which is what makes the evaluation set worth anything. Your name
+      is stored beside the rows you create and appears in the project's analytics.
+      Closing the session, or the server restarting, sends you back here.
+    </p>
+  </form>
+
+  <a class="back" href="/">Back to the public dashboard</a>
+</main>
+
+<script>
+const form = document.getElementById("form");
+const go = document.getElementById("go");
+const error = document.getElementById("error");
+
+// Where to go afterwards. `next` is read as a path only, never as a URL: a
+// visitor arriving from a link with ?next=https://elsewhere would otherwise be
+// bounced off this site by its own sign in page.
+function destination() {
+  const asked = new URLSearchParams(location.search).get("next") || "";
+  return asked.startsWith("/") && !asked.startsWith("//") ? asked : "/workbench";
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = document.getElementById("name").value.trim();
+  if (!name) return;
+
+  go.disabled = true;
+  go.textContent = "One moment";
+  error.hidden = true;
+
+  try {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!response.ok) throw new Error(`the server answered ${response.status}`);
+    location.href = destination();
+  } catch (failure) {
+    error.textContent = `Could not start a session: ${failure.message}.`;
+    error.hidden = false;
+    go.disabled = false;
+    go.textContent = "Enter the workbench";
+  }
+});
+</script>
+</body>
+</html>

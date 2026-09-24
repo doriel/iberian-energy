@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIBEL workbench</title>
+<style>
+  :root {
+    --ink: #10151c; --muted: #5d6b7a; --line: #dfe5ec; --bg: #f6f8fa;
+    --card: #fff; --accent: #1b4d7a; --on-accent: #fff; --warn: #8a4b12; --bad: #93221f;
+    --good: #14603a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e6edf3; --muted: #9aa8b6; --line: #2a333d; --bg: #0f1419;
+      --card: #161c23; --accent: #7fb2e0; --on-accent: #0b1017; --warn: #d79a55; --bad: #e0736f;
+      --good: #6cc39a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 16px 64px; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; }
+  header { padding: 28px 0 12px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; letter-spacing: .02em; }
+  p.lede { color: var(--muted); margin: 0; }
+  section {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px; margin: 16px 0;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input, select, textarea, button {
+    font: inherit; color: inherit; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
+  }
+  input, select, textarea { width: 100%; }
+  button {
+    background: var(--accent); color: var(--on-accent); border: 0; cursor: pointer;
+    padding: 9px 15px; font-weight: 600;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.quiet { background: transparent; color: var(--accent); font-weight: 500; padding: 4px 8px; }
+  button.danger { background: transparent; color: var(--bad); font-weight: 500; padding: 4px 8px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 1 1 130px; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 14px 0; font-style: italic; }
+  .error {
+    color: var(--bad); border-left: 3px solid var(--bad); padding: 8px 12px;
+    background: color-mix(in srgb, var(--bad) 8%, transparent); border-radius: 0 6px 6px 0;
+  }
+  .note {
+    border-left: 3px solid var(--warn); padding: 8px 12px; margin: 10px 0;
+    background: color-mix(in srgb, var(--warn) 10%, transparent); border-radius: 0 6px 6px 0;
+  }
+  .ok { color: var(--good); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .chat { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .bubble { padding: 10px 13px; border-radius: 10px; max-width: 80%; white-space: pre-wrap; }
+  .bubble.you { align-self: flex-end; background: var(--accent); color: var(--on-accent); }
+  .bubble.them { align-self: flex-start; border: 1px solid var(--line); }
+  .pill {
+    display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 99px;
+    border: 1px solid var(--line);
+  }
+  .pill.low { color: var(--bad); border-color: var(--bad); }
+  .spin::after {
+    content: ""; display: inline-block; width: 11px; height: 11px; margin-left: 7px;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: spin .7s linear infinite; vertical-align: -1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .bar { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .bar > div:first-child { flex: 1 1 320px; }
+  .whoami {
+    display: flex; align-items: center; gap: 8px; font-size: 14px;
+    border: 1px solid var(--line); border-radius: 999px; padding: 5px 6px 5px 14px;
+    background: var(--card); white-space: nowrap;
+  }
+  nav { margin-top: 12px; font-size: 14px; }
+  nav a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <div class="bar">
+    <div>
+      <h1>MIBEL workbench</h1>
+      <p class="lede">
+        Ask about an episode, judge what caused it, or set a price alert.
+        Anything you save is stored and flows back into the evaluation.
+      </p>
+    </div>
+    <div class="whoami">
+      <span class="muted">Working as</span>
+      <strong id="who-name">&hellip;</strong>
+      <button class="quiet" id="signout">Sign out</button>
+    </div>
+  </div>
+  <nav><a href="/">Public dashboard</a></nav>
+</header>
+
+<section>
+  <h2>Ask</h2>
+  <div class="chat" id="chat"></div>
+  <div class="row">
+    <div><input id="question" placeholder="Which episode cost the most, and why?" autocomplete="off"></div>
+    <div style="flex:0 0 auto"><button id="send">Send</button></div>
+  </div>
+  <p class="muted" style="font-size:13px;margin-bottom:0">
+    The agent can look things up, save an alert, record a judgement, and delete
+    an alert. Deleting asks first.
+  </p>
+</section>
+
+<section>
+  <h2>Episodes to judge</h2>
+  <div class="row" style="margin-bottom:12px">
+    <div style="flex:0 0 auto">
+      <label for="only-mine">Show</label>
+      <select id="only-mine">
+        <option value="true">Ones I have not judged</option>
+        <option value="false">All, worst first</option>
+      </select>
+    </div>
+    <div style="flex:0 0 auto"><button class="quiet" id="reload-episodes">Reload</button></div>
+  </div>
+  <div id="episodes"></div>
+</section>
+
+<section>
+  <h2>Your alerts</h2>
+  <div class="row" style="margin-bottom:12px">
+    <div>
+      <label for="zone">Zone</label>
+      <select id="zone"><option>PT</option><option>ES</option></select>
+    </div>
+    <div>
+      <label for="direction">When the price goes</label>
+      <select id="direction"><option>above</option><option>below</option></select>
+    </div>
+    <div>
+      <label for="threshold">EUR/MWh</label>
+      <input id="threshold" type="number" step="0.01" min="0" max="3000" value="20">
+    </div>
+    <div style="flex:0 0 auto"><button id="add-alert">Save alert</button></div>
+  </div>
+  <div id="alerts"></div>
+</section>
+
+<section>
+  <h2>Your judgements</h2>
+  <div id="labels"></div>
+</section>
+
+<section>
+  <h2>What the agent has done, last seven days</h2>
+  <p class="muted" style="margin-top:0;font-size:13px">
+    Straight from the audit log. Refused is validation doing its job and is
+    counted apart from failed, because a success rate that mixes them falls when
+    the checks get stricter.
+  </p>
+  <div id="activity"></div>
+</section>
+
+</main>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+
+let history = [];
+
+const escape = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const number = (value, digits = 2) =>
+  value === null || value === undefined || value === ""
+    ? "—"
+    : Number(value).toLocaleString(undefined, {
+        minimumFractionDigits: digits, maximumFractionDigits: digits });
+
+/** Every fetch goes through here, so no failure reaches the page as a spinner
+ *  that never stops. A network error and a 500 look the same to a person and
+ *  are told the same way. */
+async function call(url, options) {
+  try {
+    const response = await fetch(url, {
+      headers: { "Content-Type": "application/json" }, ...options,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { ok: false, error: body.detail || `The server said ${response.status}.` };
+    }
+    return body;
+  } catch (err) {
+    return { ok: false, error: "The server could not be reached." };
+  }
+}
+
+function render(target, payload, build) {
+  const node = $(target);
+  if (payload.ok === false) {
+    node.innerHTML = `<p class="error">${escape(payload.error)}</p>`;
+    return;
+  }
+  const rows = payload.rows ?? [];
+  node.innerHTML = rows.length ? build(rows) : `<p class="empty">Nothing here yet.</p>`;
+}
+
+// --- episodes ---------------------------------------------------------------
+
+const CAUSES = [
+  ["saturation_planned", "Low capacity, a planned outage fits"],
+  ["saturation_unplanned", "Low capacity, an unplanned outage fits"],
+  ["saturation_no_notice", "Low capacity, no notice accounts for it"],
+  ["saturation_ordinary_capacity", "Ordinary capacity, nothing reduced it"],
+  ["not_saturated", "Priced apart with room on the border"],
+  ["threshold_artifact", "Rounding, not a real event"],
+  ["unclear", "The evidence does not settle it"],
+];
+
+function episodeRow(row) {
+  const percentile = row.capacity_percentile;
+  const hint =
+    percentile === null || percentile === undefined
+      ? ""
+      : percentile < 25
+      ? `<span class="pill low">bottom quarter</span>`
+      : `<span class="pill">ordinary level</span>`;
+  return `
+    <tr>
+      <td><strong>${escape(row.episode_key)}</strong><br>
+          <span class="muted">${escape(row.severity)}, ${escape(row.premium_side)} pays</span></td>
+      <td class="num">${number(row.peak_abs_spread)}</td>
+      <td class="num">${number(row.min_capacity_mw, 0)}<br>
+          <span class="muted">p${number(percentile, 0)}</span> ${hint}</td>
+      <td>
+        <select data-cause="${escape(row.episode_key)}">
+          <option value="" selected>Choose one</option>
+          ${CAUSES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}
+        </select>
+      </td>
+      <td>
+        <select data-confidence="${escape(row.episode_key)}">
+          <option value="" selected>How sure</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select>
+      </td>
+      <td><button class="quiet" data-save="${escape(row.episode_key)}">Save</button></td>
+    </tr>`;
+}
+
+async function loadEpisodes() {
+  $("episodes").innerHTML = `<p class="muted spin">Loading</p>`;
+  const only = $("only-mine").value;
+  const payload = await call(`/api/episodes?limit=25&unlabelled_only=${only}`);
+  render("episodes", payload, (rows) => `
+    <table>
+      <thead><tr>
+        <th>Episode</th><th class="num">Spread</th><th class="num">Capacity</th>
+        <th>Cause</th><th>Confidence</th><th></th>
+      </tr></thead>
+      <tbody>${rows.map(episodeRow).join("")}</tbody>
+    </table>`);
+}
+
+$("episodes").addEventListener("click", async (event) => {
+  const key = event.target.dataset.save;
+  if (!key) return;
+
+  // Nothing is preselected, and nothing is assumed here either. A judgement
+  // saved because a dropdown happened to be sitting on its first option is
+  // not a judgement, and this table is where the evaluation's ground truth
+  // comes from.
+  const cause = document.querySelector(`[data-cause="${key}"]`).value;
+  const confidence = document.querySelector(`[data-confidence="${key}"]`).value;
+  if (!cause || !confidence) {
+    announce({
+      status: "rejected",
+      message: `Pick a cause and say how sure you are before saving ${key}.`,
+    });
+    return;
+  }
+
+  event.target.disabled = true;
+  event.target.textContent = "Saving";
+  const result = await call("/api/labels", {
+    method: "POST",
+    body: JSON.stringify({ episode_key: key, true_cause: cause, confidence }),
+  });
+  announce(result);
+  await Promise.all([loadEpisodes(), loadLabels(), loadActivity()]);
+});
+
+// --- alerts -----------------------------------------------------------------
+
+async function loadAlerts() {
+  $("alerts").innerHTML = `<p class="muted spin">Loading</p>`;
+  render("alerts", await call("/api/alerts"), (rows) => `
+    <table>
+      <thead><tr><th>Zone</th><th>When</th><th class="num">EUR/MWh</th><th>State</th><th></th></tr></thead>
+      <tbody>${rows.map((row) => `
+        <tr>
+          <td>${escape(row.zone)}</td>
+          <td>goes ${escape(row.direction)}</td>
+          <td class="num">${number(row.threshold_eur_mwh)}</td>
+          <td>${row.active ? "active" : "off"}</td>
+          <td><button class="danger" data-delete="${row.id}">Delete</button></td>
+        </tr>`).join("")}</tbody>
+    </table>`);
+}
+
+$("alerts").addEventListener("click", async (event) => {
+  const id = event.target.dataset.delete;
+  if (!id) return;
+  // The first call is refused on purpose and comes back describing what would
+  // go. The confirmation is the person answering that, not a browser dialog
+  // written here: the server decides what is consequential.
+  const asked = await call(`/api/alerts/${id}`, { method: "DELETE" });
+  if (asked.status === "rejected") {
+    if (!window.confirm(asked.message)) { announce({ status: "rejected", message: "Left alone." }); return; }
+    announce(await call(`/api/alerts/${id}?confirmed=true`, { method: "DELETE" }));
+  } else {
+    announce(asked);
+  }
+  await Promise.all([loadAlerts(), loadActivity()]);
+});
+
+$("add-alert").addEventListener("click", async () => {
+  $("add-alert").disabled = true;
+  const result = await call("/api/alerts", {
+    method: "POST",
+    body: JSON.stringify({
+      zone: $("zone").value,
+      direction: $("direction").value,
+      threshold_eur_mwh: parseFloat($("threshold").value),
+    }),
+  });
+  $("add-alert").disabled = false;
+  announce(result);
+  await Promise.all([loadAlerts(), loadActivity()]);
+});
+
+// --- labels and activity ------------------------------------------------------
+
+async function loadLabels() {
+  render("labels", await call("/api/labels"), (rows) => `
+    <table>
+      <thead><tr><th>Episode</th><th>Cause</th><th>Confidence</th><th>Note</th></tr></thead>
+      <tbody>${rows.map((row) => `
+        <tr>
+          <td>${escape(row.episode_key)}</td>
+          <td>${escape(row.true_cause)}</td>
+          <td>${escape(row.confidence)}</td>
+          <td class="muted">${escape(row.notes || "")}</td>
+        </tr>`).join("")}</tbody>
+    </table>`);
+}
+
+async function loadActivity() {
+  render("activity", await call("/api/activity"), (rows) => `
+    <table>
+      <thead><tr><th>Tool</th><th>Outcome</th><th class="num">Calls</th><th class="num">Avg ms</th></tr></thead>
+      <tbody>${rows.map((row) => `
+        <tr>
+          <td>${escape(row.tool)}</td>
+          <td class="${row.status === "ok" ? "ok" : "muted"}">${escape(row.status)}</td>
+          <td class="num">${row.calls}</td>
+          <td class="num">${number(row.avg_ms, 0)}</td>
+        </tr>`).join("")}</tbody>
+    </table>`);
+}
+
+// --- the agent ----------------------------------------------------------------
+
+function bubble(role, text) {
+  const node = document.createElement("div");
+  node.className = `bubble ${role}`;
+  node.textContent = text;
+  $("chat").appendChild(node);
+  node.scrollIntoView({ block: "nearest" });
+  return node;
+}
+
+function announce(result) {
+  if (!result) return;
+  const known = ["ok", "rejected", "error"].includes(result.status);
+  const text = result.message || result.error || "Done.";
+  const node = document.createElement("p");
+  node.className = result.status === "ok" ? "ok" : known ? "note" : "error";
+  node.textContent = text;
+  $("chat").appendChild(node);
+  node.scrollIntoView({ block: "nearest" });
+}
+
+async function send() {
+  const question = $("question").value.trim();
+  if (!question) return;
+  $("question").value = "";
+  bubble("you", question);
+  history.push({ role: "user", content: question });
+
+  $("send").disabled = true;
+  const waiting = bubble("them", "Thinking");
+  waiting.classList.add("spin");
+
+  const payload = await call("/api/ask", {
+    method: "POST",
+    body: JSON.stringify({ question, history: history.slice(0, -1) }),
+  });
+
+  waiting.remove();
+  $("send").disabled = false;
+
+  if (payload.ok === false && payload.reply === undefined) {
+    announce({ status: "error", message: payload.error });
+    return;
+  }
+  bubble("them", payload.reply || "(no answer)");
+  history.push({ role: "assistant", content: payload.reply || "" });
+  (payload.results || []).forEach(announce);
+
+  // A write through the conversation has to show up in the panels without a
+  // manual refresh, or the person cannot tell whether it really happened.
+  if (payload.wrote) {
+    await Promise.all([loadAlerts(), loadLabels(), loadEpisodes()]);
+  }
+  await loadActivity();
+}
+
+$("send").addEventListener("click", send);
+$("question").addEventListener("keydown", (event) => { if (event.key === "Enter") send(); });
+$("reload-episodes").addEventListener("click", loadEpisodes);
+$("only-mine").addEventListener("change", loadEpisodes);
+
+// --- the visitor ---------------------------------------------------------------
+
+$("signout").addEventListener("click", async () => {
+  await fetch("/api/signout", { method: "POST" });
+  location.href = "/signin";
+});
+
+// The name comes from the server, not from the cookie. The cookie is HttpOnly
+// and signed, so this page cannot read it and could not be trusted if it could:
+// the name on the rows is whichever one the server verified, and showing a
+// different one in the corner would be a lie that is hard to notice.
+async function begin() {
+  const session = await fetch("/api/session").then((r) => r.json()).catch(() => null);
+
+  // The route already redirects an unsigned visitor, so arriving here without a
+  // session means it expired between the page loading and this request, which
+  // a restart does. Back to the door rather than into an interface that will
+  // file everything under "guest".
+  if (!session || !session.signed_in) {
+    location.href = "/signin";
+    return;
+  }
+
+  $("who-name").textContent = session.name;
+  document.title = `MIBEL workbench, ${session.name}`;
+  await Promise.all([loadEpisodes(), loadAlerts(), loadLabels(), loadActivity()]);
+}
+
+begin();
+</script>
+</body>
+</html>

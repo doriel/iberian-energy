@@ -1,9 +1,17 @@
 # The web service, and nothing else. This is the file Render installs.
 #
-# Short on purpose. The dashboard is served from app/public/data.json, which is
-# built by scripts/export_public_data.py and committed. Nothing at request time
-# reads a Parquet file, queries a warehouse or calls Databricks, so pandas,
-# pyarrow and the SDK stay out of the deploy and out of the cold start.
+# Short on purpose, and shorter than it was before the workbench. The dashboard
+# at / is still served from app/public/data.json, which is built by
+# scripts/export_public_data.py and committed, so that page needs nothing to be
+# awake. pandas and pyarrow stay out: nothing at request time reads a Parquet
+# file or queries a warehouse.
+#
+# The SDK and the Postgres driver had to come in. /workbench reaches Lakebase,
+# whose credentials last sixty minutes and have to be generated per connection,
+# and it calls a serving endpoint. Both need the SDK to authenticate as the
+# service principal. The dashboard does not import either, and main.py loads the
+# workbench routes inside a try, so a deployment missing the configuration still
+# serves the page a visitor lands on.
 #
 #     pip install -r requirements-app.txt
 #     python -m uvicorn app.main:app --reload --port 8000
@@ -15,3 +23,13 @@
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 requests>=2.32
+
+# Lakebase. psycopg 3, binary wheel, no build step on the deploy host.
+psycopg[binary]>=3.2,<4.0
+
+# Credentials for Lakebase and for the serving endpoint. Pinned below the next
+# major because this one authenticates a running service.
+databricks-sdk>=0.60,<1.0
+
+# Request bodies, arriving with FastAPI already.
+pydantic>=2.0,<3.0
