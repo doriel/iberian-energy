@@ -35,6 +35,10 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from iberian.analysis.capacity import (  # noqa: E402
+    ORDINARY_CAPACITY_PERCENTILE,
+    percentile_function,
+)
 from iberian.config import EIC_PORTUGAL, EIC_SPAIN, Settings  # noqa: E402
 from iberian.ingestion.entsoe import EntsoeClient  # noqa: E402
 from iberian.market_time import market_day_window  # noqa: E402
@@ -60,23 +64,6 @@ CAUSES = {
 #: was carrying unusually little and something reduced it. At or above it, the
 #: border was at an ordinary level and there is no reduction to explain.
 #:
-#: There is no published "normal" capacity for this border: the operator
-#: recomputes the net transfer capacity every day from the whole system state,
-#: and the observed values run from 210 to 7020 MW with no mode. A percentile of
-#: the window is the only reference the public data supports.
-#:
-#: The quartile rather than the median, because "unusually low" has to mean
-#: something. Half of all quarter hours are below the median by construction, so
-#: a median cut calls an utterly ordinary capacity a reduction. On the first
-#: sixty two episodes the choice moves twelve of them:
-#:
-#:     p25 -> 21 ordinary capacity, 32 outage consistent
-#:     p50 ->  8 ordinary capacity, 45 outage consistent
-#:
-#: One named constant rather than a figure buried in a condition, because it is
-#: a judgement about what "unusual" means and somebody should be able to find it
-#: and argue with it.
-ORDINARY_CAPACITY_PERCENTILE = 25.0
 
 LABEL_COLUMNS = ["true_cause", "confidence", "notes"]
 
@@ -172,20 +159,12 @@ def main() -> int:
     # value, which is a mean over a boolean mask and does not care about order.
     # An earlier version sorted it in place and crashed, because `to_numpy`
     # hands back a read-only view of pandas' own buffer.
-    capacity_series = intervals["capacity_mw"].dropna().to_numpy()
-
-    def capacity_percentile(value) -> float | None:
-        if value is None or pd.isna(value) or capacity_series.size == 0:
-            return None
-        return round(
-            float((capacity_series < float(value)).mean() * 100), 1
-        )
-
-    median_capacity = (
-        round(float(pd.Series(capacity_series).median()), 0)
-        if capacity_series.size
-        else None
-    )
+    # The reference the sheet was missing, and without which the central
+    # question cannot be answered at all. Shared with the task that copies
+    # episodes into Lakebase, so the application and this sheet cannot disagree
+    # about an episode for reasons nobody can see.
+    capacity_percentile = percentile_function(intervals["capacity_mw"].dropna())
+    median_capacity = round(float(intervals["capacity_mw"].median()), 0)
 
     client = EntsoeClient(Settings.from_env().require_entsoe_token())
 
