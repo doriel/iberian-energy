@@ -1,16 +1,23 @@
-"""Web service: the public dashboard, plus the Databricks sign in flow.
+"""Web service: the public dashboard, the workbench, and a sign in diagnostic.
 
-The workspace issues OAuth app integrations rather than service principal
-secrets, so this app cannot authenticate as itself. It authenticates as
-whoever signs in, using the authorization code flow, and the token it gets
-back carries that person's own permissions.
+**How this application reaches Databricks, and how that was settled.** It
+authenticates as a service principal, using `DATABRICKS_CLIENT_ID` and
+`DATABRICKS_CLIENT_SECRET`, and connects to Lakebase as that principal's
+Postgres role. It did not start there. Creating a service principal is refused
+as admin only in this workspace, so the workbench was briefly rebuilt on the
+OAuth flow below, authenticating each visitor and using their own token. That
+version worked and was abandoned: it needed a redirect URL registered on an app
+integration this account cannot edit, and a Postgres role for every reviewer.
+Both are somebody else's permission to grant.
 
-The consequence is worth stating plainly rather than discovering later: only
-someone with an account in this Databricks workspace can use anything behind
-the sign in. Pages meant for a manufacturer or a journalist have to be served
-from published data instead, which is what `/` does. The data file is built by
-`scripts/export_public_data.py` from the gold tables, so the page needs no
-warehouse, no token and no round trip to REE.
+The way out was that a Databricks App built earlier in the boot camp had left a
+service principal behind, and a secret for it can be minted at workspace level
+with `databricks service-principal-secrets-proxy create`. So the application has
+an identity of its own after all, and a visitor needs no Databricks account.
+
+`/login` and `/callback` remain, and are worth keeping: they prove the OAuth
+integration works and they are the first thing to reach for if this ever does
+need per person access. They are a diagnostic. Nothing is behind them.
 
 Routes:
     /           the dashboard, served from app/public/index.html
@@ -18,17 +25,14 @@ Routes:
     /signin     name yourself, which is what the workbench means by a session
     /workbench  the analyst's tool, behind that name
     /auth       sign in status, and a link to start the flow
-    /login      redirect to Databricks
+    /login      redirect to Databricks, a diagnostic
     /callback   exchange the code for a token and report what came back
     /healthz    liveness, no auth
 
 `/signin` and the Databricks flow are two different things and the names get
-confused, so: the Databricks flow proves an identity and is what anything
-touching the workspace on a person's behalf would need. `/signin` proves
-nothing. It attributes rows to a name so two reviewers' judgements stay apart,
-and the page says so in as many words. The workbench is deliberately behind the
-second and not the first, because it has to be usable by somebody reviewing this
-project who has no account in this workspace.
+confused, so: the Databricks flow proves an identity. `/signin` proves nothing.
+It attributes rows to a name so two reviewers' judgements stay apart, and the
+page says so in as many words.
 
 Configuration, all from the environment:
     DATABRICKS_HOST           https://dbc-xxxxxxxx-xxxx.cloud.databricks.com
@@ -55,6 +59,7 @@ import os
 import secrets
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -166,51 +171,6 @@ def decode_claims(token: str) -> dict:
 #: say why. The first is a better page to land on.
 SESSION_COOKIE_SECONDS = 8 * 3600
 
-#: Which Lakebase endpoint the credential is generated for. Same shape as the
-#: notebooks use, and read from the environment for the same reason.
-def lakebase_endpoint() -> str:
-    """Which Lakebase endpoint a credential is generated for.
-
-    No defaults. A fallback here would be one person's project name compiled
-    into a public repository, and worse, a misconfigured deployment would point
-    at it and fail somewhere confusing instead of at start up with a name.
-    """
-    missing = [
-        name
-        for name in ("LAKEBASE_PROJECT", "LAKEBASE_BRANCH", "LAKEBASE_ENDPOINT_ID")
-        if not os.environ.get(name)
-    ]
-    if missing:
-        raise RuntimeError(
-            f"Not configured: {', '.join(missing)}. The workbench cannot "
-            "generate a database credential without knowing which endpoint."
-        )
-    return (
-        f"projects/{os.environ['LAKEBASE_PROJECT']}"
-        f"/branches/{os.environ['LAKEBASE_BRANCH']}"
-        f"/endpoints/{os.environ['LAKEBASE_ENDPOINT_ID']}"
-    )
-
-
-def database_credential_for(access_token: str) -> str:
-    """Spend a person's platform token on one Lakebase credential.
-
-    The SDK client is built around the token rather than the environment, so
-    this call is made as the person who signed in and not as whatever identity
-    the process happens to be configured with. That is the whole point: the
-    database sees the reviewer, and their own grants decide what they can do.
-
-    Imported here rather than at module scope so the dashboard half of this
-    service still starts on a host without the SDK installed.
-    """
-    from databricks.sdk import WorkspaceClient
-
-    workspace = WorkspaceClient(host=HOST, token=access_token, auth_type="pat")
-    return workspace.postgres.generate_database_credential(
-        endpoint=lakebase_endpoint()
-    ).token
-
-
 def page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(
         f"""<!doctype html>
@@ -276,16 +236,13 @@ def workbench(mibel_session: str | None = Cookie(default=None)):
     show the visitor a working interface for a moment and then take it away,
     which looks like a fault rather than a redirect.
     """
-    from iberian.app.session import SESSIONS, verify
+    from iberian.app.session import verify
 
-    # Both checks, and the second is the one that matters. A signature only
-    # proves this server issued the cookie at some point; the store is what
-    # knows whether the session behind it is still alive. Serving the page on
-    # the signature alone would show a working interface to somebody who has
-    # signed out or whose hour is up, and then take it away once the first
-    # request came back empty.
-    found = verify(mibel_session)
-    if found is None or SESSIONS.get(found[1]) is None:
+    # Checked here, on the server, before the file is sent. Letting the page
+    # load and having its own script discover there is no session would show a
+    # working interface for a moment and then take it away, which looks like a
+    # fault rather than a redirect.
+    if verify(mibel_session) is None:
         return RedirectResponse("/signin", status_code=303)
 
     page_file = PUBLIC / "workbench.html"
@@ -440,52 +397,34 @@ def callback(
             "including the scheme and any trailing slash.</p>",
         )
 
-    from iberian.app.session import SESSIONS, sign
-
     claims = decode_claims(body["access_token"])
-    email = claims.get("sub") or ""
-    if not email:
-        return page(
-            "Sign in failed",
-            '<h1 class="bad">The token names nobody</h1>'
-            "<p>The exchange succeeded but the token carries no subject, so "
-            "there is no identity to attribute work to.</p>"
-            '<p><a href="/signin">Back</a></p>',
-        )
-
-    # The one use this application makes of the platform token. It carries the
-    # person's whole workspace, so it is spent here and not kept: what is stored
-    # is the Lakebase credential it produces, which opens a database connection
-    # as that person and does nothing else.
-    try:
-        credential = database_credential_for(body["access_token"])
-    except Exception as exc:
-        return page(
-            "Signed in, but the database refused",
-            '<h1 class="bad">Databricks knows you, Lakebase does not</h1>'
-            f"<p>Signed in as <code>{html.escape(email)}</code>, but generating "
-            "a database credential failed.</p>"
-            f"<pre>{html.escape(str(exc)[:600])}</pre>"
-            "<p>The usual cause is that this identity has no Postgres role in "
-            "the project yet. A role is a database object and workspace "
-            "permissions do not create one.</p>"
-            '<p><a href="/signin">Back</a></p>',
-        )
-    finally:
-        # Belt and braces. The local name is the only reference this function
-        # holds, and it goes out of scope anyway, but saying so here is how the
-        # next person reading this knows it was a decision.
-        body.pop("access_token", None)
-        body.pop("refresh_token", None)
-
-    session_id = SESSIONS.open(email=email, database_credential=credential)
-
-    response = RedirectResponse("/workbench", status_code=303)
-    response.set_cookie(
-        "mibel_session",
-        sign(email, session_id),
-        max_age=SESSION_COOKIE_SECONDS,
-        httponly=True,
-        samesite="lax",
+    expires = claims.get("exp")
+    when = (
+        datetime.fromtimestamp(expires, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if expires
+        else "unknown"
     )
-    return response
+
+    rows = {
+        "Signed in as": claims.get("sub", "unknown"),
+        "Scopes granted": claims.get("scope") or "not stated",
+        "Issued by": claims.get("iss", "unknown"),
+        "Valid until": when,
+        "Refresh token": "yes" if body.get("refresh_token") else "no",
+    }
+    table = "".join(
+        f"<tr><td><strong>{html.escape(k)}</strong></td>"
+        f"<td><code>{html.escape(str(v))}</code></td></tr>"
+        for k, v in rows.items()
+    )
+
+    return page(
+        "Signed in",
+        '<h1 class="ok">Databricks sign in works</h1>'
+        f"<table>{table}</table>"
+        "<p>The access token is held in memory and is not shown here.</p>"
+        "<p>This flow is a diagnostic, not the way into the workbench. The "
+        "workbench reaches Lakebase as a service principal and asks a visitor "
+        "only for a name, so it can be opened by somebody with no account in "
+        'this workspace.</p><p><a href="/auth">Back</a></p>',
+    )

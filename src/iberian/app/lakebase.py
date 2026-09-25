@@ -1,11 +1,23 @@
 """Talking to Lakebase from a process that does not run inside Databricks.
 
-The application is deployed on Render, so it authenticates as a service
-principal and reaches the endpoint's public ingress. That works because the
-endpoint's DNS is split horizon: inside the workspace the name resolves to a
-private address over PrivateLink, and from the internet to a public load
-balancer. Worth writing down, because the private address is what a notebook
-sees and it looks alarming if you meet it first.
+Reaching the endpoint from outside works because its DNS is split horizon:
+inside the workspace the name resolves to a private address over PrivateLink,
+and from the internet to a public load balancer. Worth writing down, because
+the private address is what a notebook sees and it looks alarming if you meet
+it first.
+
+**Which identity, and an unresolved problem.** Databricks documents exactly one
+way for an application outside the workspace to reach Lakebase: a service
+principal with an OAuth secret, generating a database credential through the
+SDK. There is no static Postgres password to fall back on. In this boot camp
+workspace, creating a service principal is refused as admin only, so the
+deployed application has no identity of its own yet. Two ways out, and neither
+is in the code: an administrator creates one, or the application authenticates
+as whoever signs in through the flow in `app/main.py` and uses that person's
+token, which limits it to people with an account in this workspace.
+
+Until that is settled, this module is exercised by notebooks and by the local
+application, both of which run as a person.
 
 **Credentials last sixty minutes.** That single fact shapes this file. A
 credential fetched at start up and kept in a module variable works for an hour
@@ -68,19 +80,26 @@ def databricks_credentials(endpoint: str) -> Callable[[], str]:
     Imported inside the function so this module stays importable, and testable,
     without the SDK installed. The test suite must not need a workspace.
 
-    The SDK picks up `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID` and
-    `DATABRICKS_CLIENT_SECRET` from the environment on its own. Those are its
-    own reserved names and they are the right ones here: this is the service
-    principal the application acts as. They are not the same as the
-    `APP_OAUTH_*` pair, which is the separate flow for signing a person in, and
-    the two must not be given the same values.
+    The client comes from `workspace.py` rather than from `WorkspaceClient()`
+    directly, and that is not tidiness. The SDK resolves credentials from the
+    environment on its own, and with a CLI profile present it chose the profile
+    over the service principal: the credential was generated for a person while
+    the connection asked for the application's Postgres role, and Lakebase
+    refused with `OAuth: User is not authorized`. Nothing in that message points
+    at the profile. `workspace.py` pins the identity so it cannot happen again.
+
+    `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` are the SDK's own
+    reserved names and are the right ones here: this is the service principal
+    the application acts as. They are not the `APP_OAUTH_*` pair, which is the
+    separate flow for signing a person in, and the two must never share values.
     """
 
     def factory() -> str:
-        from databricks.sdk import WorkspaceClient
+        from iberian.app.workspace import workspace_client
 
-        workspace = WorkspaceClient()
-        return workspace.postgres.generate_database_credential(endpoint=endpoint).token
+        return workspace_client().postgres.generate_database_credential(
+            endpoint=endpoint
+        ).token
 
     return factory
 

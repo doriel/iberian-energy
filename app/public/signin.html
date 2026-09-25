@@ -51,30 +51,69 @@
 <main>
   <h1>MIBEL workbench</h1>
   <p class="lede">Judge what caused a market splitting episode, set a price alert,
-  or ask the agent. Sign in with the Databricks workspace that holds the data.</p>
+  or ask the agent. First, a name to put on your work.</p>
 
-  <form action="/login" method="get">
-    <button type="submit">Sign in with Databricks</button>
+  <form id="form" autocomplete="off">
+    <label for="name">Your name, or any name you want your entries filed under</label>
+    <input id="name" name="name" maxlength="60" required autofocus
+           placeholder="Ana Ferreira">
+    <button type="submit" id="go">Enter the workbench</button>
+    <p class="error" id="error" hidden></p>
 
+    <!-- Said on the page and not only in a comment. A visitor deciding whether
+         to type their real name is entitled to know what happens to it, and a
+         reviewer is entitled to see that this was never claimed to be more than
+         it is. -->
     <p class="plain">
-      <strong>Your account, your permissions.</strong> This application has no
-      identity of its own. It connects to the database as you, so what you can
-      read and change is decided by your own grants and nothing else. Your name
-      is recorded beside the judgements you make, which is what lets two
-      reviewers disagree about the same episode and have both answers kept.
-    </p>
-    <p class="plain">
-      <strong>What is kept, and for how long.</strong> The sign in produces a
-      token covering your whole workspace. This application does not store it:
-      it is used once to obtain a database credential and then discarded, so
-      what remains here can open a database connection and do nothing else.
-      That credential lasts an hour, after which you sign in again. Restarting
-      the server ends every session immediately.
+      <strong>This is not a login.</strong> There is no password and nothing is
+      protected by the name you choose. It exists so that two people judging the
+      same episode produce two separate judgements instead of overwriting each
+      other's, which is what makes the evaluation set worth anything. Your name
+      is stored beside the rows you create and appears in the project's analytics.
+      Closing the session, or the server restarting, sends you back here.
     </p>
   </form>
 
   <a class="back" href="/">Back to the public dashboard</a>
 </main>
 
+<script>
+const form = document.getElementById("form");
+const go = document.getElementById("go");
+const error = document.getElementById("error");
+
+// Where to go afterwards. `next` is read as a path only, never as a URL: a
+// visitor arriving from a link with ?next=https://elsewhere would otherwise be
+// bounced off this site by its own sign in page.
+function destination() {
+  const asked = new URLSearchParams(location.search).get("next") || "";
+  return asked.startsWith("/") && !asked.startsWith("//") ? asked : "/workbench";
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = document.getElementById("name").value.trim();
+  if (!name) return;
+
+  go.disabled = true;
+  go.textContent = "One moment";
+  error.hidden = true;
+
+  try {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!response.ok) throw new Error(`the server answered ${response.status}`);
+    location.href = destination();
+  } catch (failure) {
+    error.textContent = `Could not start a session: ${failure.message}.`;
+    error.hidden = false;
+    go.disabled = false;
+    go.textContent = "Enter the workbench";
+  }
+});
+</script>
 </body>
 </html>

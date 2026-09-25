@@ -100,7 +100,7 @@
       </p>
     </div>
     <div class="whoami">
-      <span class="muted">Signed in as</span>
+      <span class="muted">Working as</span>
       <strong id="who-name">&hellip;</strong>
       <button class="quiet" id="signout">Sign out</button>
     </div>
@@ -457,10 +457,10 @@ $("signout").addEventListener("click", async () => {
   location.href = "/signin";
 });
 
-// A session ends when its database credential does, an hour after signing in,
-// and a restart ends it sooner. Every endpoint reports that the same way, so
-// it is handled in one place: the person goes back to sign in rather than
-// watching four panels fill with the same message.
+// A restart ends every session, because the signing secret lives in the
+// process. Every endpoint reports that the same way, so it is handled in one
+// place: the person goes back to sign in rather than watching four panels fill
+// with the same message.
 function endedSession(payload) {
   return payload && payload.signed_out === true;
 }
@@ -475,8 +475,8 @@ async function begin() {
     return;
   }
 
-  $("who-name").textContent = session.email;
-  document.title = `MIBEL workbench, ${session.email}`;
+  $("who-name").textContent = session.name;
+  document.title = `MIBEL workbench, ${session.name}`;
   await Promise.all([loadEpisodes(), loadAlerts(), loadLabels(), loadActivity()]);
 }
 

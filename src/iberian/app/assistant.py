@@ -315,15 +315,20 @@ def databricks_chat(
     the host and the authentication headers, so the service principal
     configuration has one source.
 
+    That client comes from `workspace.py`, the same one Lakebase uses. An
+    application that reaches its database as itself and its model endpoint as
+    whoever deployed it would work until the day somebody else deploys it.
+
     Temperature at zero: this agent chooses tools and restates their results,
     and there is nothing here that sampling improves.
     """
 
     def chat(messages: list[dict], tools: list[dict]) -> dict:
         import requests
-        from databricks.sdk import WorkspaceClient
 
-        workspace = WorkspaceClient()
+        from iberian.app.workspace import workspace_client
+
+        workspace = workspace_client()
         headers = {"Content-Type": "application/json"}
         headers.update(workspace.config.authenticate())
 

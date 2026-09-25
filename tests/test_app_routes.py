@@ -1,14 +1,12 @@
-"""The doors: who gets in, what the server keeps, and when a session ends.
+"""The doors: which pages are behind a name, and what happens without one.
 
 Driven through the real application rather than by calling the route functions,
 because what is being checked is the wiring. A redirect that works when you call
 the function and not when a browser asks for the page is the failure this is
 here to catch.
 
-Nothing here reaches Databricks or Lakebase. The point where a route would need
-either is exactly the point where the session question is already decided, so
-the tests stop there, and the one place that does call out is replaced by a
-stand in.
+Lakebase is never reached. These tests stop at the point where a route would
+need it, which is exactly where the session question is already decided.
 """
 
 from __future__ import annotations
@@ -39,9 +37,7 @@ except (ImportError, RuntimeError) as exc:  # pragma: no cover - environment
 
 import app.main as main  # noqa: E402
 from app.main import app  # noqa: E402
-from iberian.app.session import SESSIONS, sign  # noqa: E402
-
-REVIEWER = "ta@dataexpert.io"
+from iberian.app.session import sign  # noqa: E402
 
 
 @pytest.fixture()
@@ -50,20 +46,6 @@ def client():
     # client that follows it silently turns a failure into a passing test.
     with fastapi_testclient.TestClient(app, follow_redirects=False) as running:
         yield running
-
-
-@pytest.fixture(autouse=True)
-def empty_sessions():
-    SESSIONS._sessions.clear()
-    yield
-    SESSIONS._sessions.clear()
-
-
-def signed_in(client, email: str = REVIEWER) -> str:
-    """Put a live session in place without going near Databricks."""
-    session_id = SESSIONS.open(email=email, database_credential="not-a-real-token")
-    client.cookies.set("mibel_session", sign(email, session_id))
-    return session_id
 
 
 # --- the public half, which must never ask for anything ------------------------
@@ -88,16 +70,9 @@ def test_the_sign_in_page_is_served(client):
     assert client.get("/signin").status_code == 200
 
 
-def test_the_sign_in_page_sends_you_to_databricks(client):
-    """No name field any more. The identity has to be one somebody verified."""
-    body = client.get("/signin").text
-    assert 'action="/login"' in body
-    assert "Sign in with Databricks" in body
-
-
-def test_the_sign_in_page_says_what_it_keeps(client):
+def test_the_sign_in_page_says_it_is_not_a_login(client):
     """A claim on the page, so it is a claim a test can hold to."""
-    assert "does not store it" in client.get("/signin").text
+    assert "not a login" in client.get("/signin").text.lower()
 
 
 def test_the_workbench_without_a_session_goes_to_sign_in(client):
@@ -107,22 +82,12 @@ def test_the_workbench_without_a_session_goes_to_sign_in(client):
 
 
 def test_the_workbench_with_a_forged_cookie_goes_to_sign_in(client):
-    client.cookies.set("mibel_session", f"{REVIEWER}.s1.deadbeef")
+    client.cookies.set("mibel_session", "Ana.s1.deadbeef")
     assert client.get("/workbench").status_code == 303
 
 
-def test_a_signed_cookie_whose_session_is_gone_does_not_open_anything(client):
-    """The cookie outlives the credential on purpose, so this path is ordinary.
-
-    Signed, unforged, and still refused, because the store is what decides.
-    """
-    client.cookies.set("mibel_session", sign(REVIEWER, "a-session-that-ended"))
-    assert client.get("/api/session").json()["signed_in"] is False
-    assert client.get("/api/episodes").json()["signed_out"] is True
-
-
-def test_the_workbench_with_a_live_session_is_served(client):
-    signed_in(client)
+def test_the_workbench_with_a_valid_session_is_served(client):
+    client.cookies.set("mibel_session", sign("Ana", "s1"))
     response = client.get("/workbench")
     assert response.status_code == 200
     assert "MIBEL workbench" in response.text
@@ -130,169 +95,113 @@ def test_the_workbench_with_a_live_session_is_served(client):
 
 def test_the_workbench_is_not_cached(client):
     """Otherwise the back button shows the previous person's page after a sign out."""
-    signed_in(client)
+    client.cookies.set("mibel_session", sign("Ana", "s1"))
     assert client.get("/workbench").headers["cache-control"] == "no-store"
 
 
-# --- what the server reports ---------------------------------------------------
+# --- starting and ending a session ---------------------------------------------
 
 
-def test_the_session_route_reports_the_verified_email(client):
-    signed_in(client)
-    assert client.get("/api/session").json() == {"signed_in": True, "email": REVIEWER}
+def test_starting_a_session_sets_a_signed_http_only_cookie(client):
+    response = client.post("/api/session", json={"name": "Ana"})
+    assert response.status_code == 200
+    assert response.json()["name"] == "Ana"
+
+    header = response.headers["set-cookie"]
+    assert "mibel_session=" in header
+    assert "HttpOnly" in header
+    # The name must not be sitting in the cookie in the clear, or the signature
+    # is decoration.
+    assert "=Ana" not in header
+
+
+def test_the_session_route_reports_the_name_the_server_verified(client):
+    client.post("/api/session", json={"name": "Ana Ferreira"})
+    assert client.get("/api/session").json() == {"signed_in": True, "name": "Ana Ferreira"}
 
 
 def test_the_session_route_is_honest_when_there_is_none(client):
-    assert client.get("/api/session").json() == {"signed_in": False, "email": ""}
+    assert client.get("/api/session").json() == {"signed_in": False, "name": ""}
 
 
-def test_signing_out_drops_the_credential_server_side(client):
-    """Not just the cookie. Signing out has to end the database access."""
-    session_id = signed_in(client)
-    assert SESSIONS.get(session_id) is not None
+def test_an_empty_name_becomes_the_anonymous_one(client):
+    assert client.post("/api/session", json={"name": "   "}).json()["name"] == "guest"
+
+
+def test_two_sessions_for_the_same_name_are_different_sessions(client):
+    first = client.post("/api/session", json={"name": "Ana"}).json()["session_id"]
+    second = client.post("/api/session", json={"name": "Ana"}).json()["session_id"]
+    assert first != second
+
+
+def test_signing_out_clears_the_cookie_and_the_workbench_closes(client):
+    client.post("/api/session", json={"name": "Ana"})
+    assert client.get("/workbench").status_code == 200
 
     client.post("/api/signout")
-    assert SESSIONS.get(session_id) is None
+    assert client.get("/api/session").json()["signed_in"] is False
     assert client.get("/workbench").status_code == 303
 
 
-# --- the callback, which is where a session is born ----------------------------
+# --- no name, no writes --------------------------------------------------------
 
 
-class FakeExchange:
-    """Stands in for the token endpoint. Records what it was asked."""
+def test_a_read_without_a_session_says_so_rather_than_answering(client):
+    """The failure that matters is the quiet one.
 
-    def __init__(self, body):
-        self.body = body
-        self.calls = []
-
-    def __call__(self, url, **kwargs):
-        self.calls.append((url, kwargs))
-
-        class Response:
-            def json(inner):
-                return dict(self.body)
-
-        return Response()
-
-
-def start_flow(client):
-    """Begin a sign in so the callback has a state to answer."""
-    client.get("/login")
-    return next(iter(main._PENDING))
-
-
-@pytest.fixture()
-def configured(monkeypatch):
-    monkeypatch.setattr(main, "HOST", "https://example.cloud.databricks.com")
-    monkeypatch.setattr(main, "CLIENT_ID", "client")
-    monkeypatch.setattr(main, "CLIENT_SECRET", "secret")
-    monkeypatch.setattr(main, "REDIRECT_URI", "http://testserver/callback")
-    monkeypatch.setattr(main, "AUTHORIZE_URL", "https://example.cloud.databricks.com/oidc/v1/authorize")
-    main._PENDING.clear()
-    yield monkeypatch
-    main._PENDING.clear()
-
-
-#: A token whose payload decodes to a subject. The signature is nonsense and is
-#: never checked here, which is the documented behaviour of decode_claims.
-def token_for(email: str) -> str:
-    import base64
-    import json
-
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": email}).encode()).decode().rstrip("=")
-    return f"header.{payload}.signature"
-
-
-def test_a_successful_callback_opens_a_session_and_redirects(client, configured):
-    configured.setattr(
-        main.requests, "post", FakeExchange({"access_token": token_for(REVIEWER)})
-    )
-    configured.setattr(main, "database_credential_for", lambda token: "db-credential")
-
-    state = start_flow(client)
-    response = client.get(f"/callback?code=abc&state={state}")
-
-    assert response.status_code == 303
-    assert response.headers["location"] == "/workbench"
-    assert len(SESSIONS) == 1
-
-
-def test_the_session_holds_the_database_credential_not_the_platform_token(
-    client, configured
-):
-    """The security claim the sign in page makes, as a test.
-
-    If this ever fails, the page is lying to the people it asks to sign in.
+    Before this, a request with no cookie was served as "guest", so a visitor
+    whose session had gone filed their judgements under a name they never chose
+    and nothing said anything. Refusing is the point.
     """
-    platform_token = token_for(REVIEWER)
-    configured.setattr(main.requests, "post", FakeExchange({"access_token": platform_token}))
-    configured.setattr(main, "database_credential_for", lambda token: "db-credential")
-
-    state = start_flow(client)
-    client.get(f"/callback?code=abc&state={state}")
-
-    identity = next(iter(SESSIONS._sessions.values()))
-    assert identity.email == REVIEWER
-    assert identity.database_credential == "db-credential"
-    assert platform_token not in vars(identity).values()
+    payload = client.get("/api/episodes").json()
+    assert payload["ok"] is False
+    assert payload["signed_out"] is True
+    assert payload["rows"] == []
 
 
-def test_the_platform_token_is_what_generates_the_credential(client, configured):
-    """And it is the person's token, not the process's."""
-    seen = []
-    configured.setattr(
-        main.requests, "post", FakeExchange({"access_token": token_for(REVIEWER)})
-    )
-    configured.setattr(
-        main, "database_credential_for", lambda token: seen.append(token) or "db"
-    )
-
-    state = start_flow(client)
-    client.get(f"/callback?code=abc&state={state}")
-
-    assert seen == [token_for(REVIEWER)]
+def test_every_read_answers_the_same_way(client):
+    for route in ["/api/episodes", "/api/alerts", "/api/labels", "/api/activity"]:
+        assert client.get(route).json()["signed_out"] is True, route
 
 
-def test_a_token_naming_nobody_is_refused(client, configured):
-    """No subject means no identity, and an unattributed judgement is worthless."""
-    configured.setattr(main.requests, "post", FakeExchange({"access_token": "header..sig"}))
+def _oauth(monkeypatch, **values):
+    """Force the OAuth settings, so neither branch depends on a developer's .env.
 
-    state = start_flow(client)
-    response = client.get(f"/callback?code=abc&state={state}")
+    The first version of this test asserted whichever page happened to render,
+    which passed in CI with nothing configured and failed on a machine that had
+    sourced its .env. A test whose result depends on the environment is telling
+    you about the environment, not the code.
+    """
+    for name in ("HOST", "CLIENT_ID", "CLIENT_SECRET", "REDIRECT_URI"):
+        monkeypatch.setattr(main, name, values.get(name, ""))
 
-    assert "names nobody" in response.text
-    assert len(SESSIONS) == 0
 
+def test_the_diagnostic_names_what_is_missing_when_it_is_not_configured(
+    client, monkeypatch
+):
+    """Nothing sits behind this flow, so an unconfigured deployment is ordinary.
 
-def test_no_session_is_opened_when_lakebase_refuses(client, configured):
-    """Signed in to Databricks is not the same as having a database role."""
-
-    def refuse(token):
-        raise RuntimeError('role "ta@dataexpert.io" does not exist')
-
-    configured.setattr(
-        main.requests, "post", FakeExchange({"access_token": token_for(REVIEWER)})
-    )
-    configured.setattr(main, "database_credential_for", refuse)
-
-    state = start_flow(client)
-    response = client.get(f"/callback?code=abc&state={state}")
+    What it must not do is pretend to work, or fall over and take the page down.
+    """
+    _oauth(monkeypatch)
+    response = client.get("/auth")
 
     assert response.status_code == 200
-    assert "does not exist" in response.text
-    assert len(SESSIONS) == 0
+    assert "APP_OAUTH_CLIENT_ID" in response.text
+    assert "/login" not in response.text
 
 
-def test_a_replayed_state_cannot_open_a_second_session(client, configured):
-    configured.setattr(
-        main.requests, "post", FakeExchange({"access_token": token_for(REVIEWER)})
+def test_the_diagnostic_offers_the_flow_once_it_is_configured(client, monkeypatch):
+    _oauth(
+        monkeypatch,
+        HOST="https://example.cloud.databricks.com",
+        CLIENT_ID="client",
+        CLIENT_SECRET="secret",
+        REDIRECT_URI="http://testserver/callback",
     )
-    configured.setattr(main, "database_credential_for", lambda token: "db")
+    response = client.get("/auth")
 
-    state = start_flow(client)
-    client.get(f"/callback?code=abc&state={state}")
-    again = client.get(f"/callback?code=abc&state={state}")
-
-    assert "Unknown state" in again.text
-    assert len(SESSIONS) == 1
+    assert response.status_code == 200
+    assert "/login" in response.text
+    # And it must not leak the secret onto a page anybody can open.
+    assert "secret" not in response.text
