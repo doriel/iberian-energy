@@ -100,7 +100,7 @@
       </p>
     </div>
     <div class="whoami">
-      <span class="muted">Working as</span>
+      <span class="muted">Signed in as</span>
       <strong id="who-name">&hellip;</strong>
       <button class="quiet" id="signout">Sign out</button>
     </div>
@@ -210,6 +210,10 @@ async function call(url, options) {
 
 function render(target, payload, build) {
   const node = $(target);
+  if (endedSession(payload)) {
+    location.href = "/signin";
+    return;
+  }
   if (payload.ok === false) {
     node.innerHTML = `<p class="error">${escape(payload.error)}</p>`;
     return;
@@ -453,24 +457,26 @@ $("signout").addEventListener("click", async () => {
   location.href = "/signin";
 });
 
-// The name comes from the server, not from the cookie. The cookie is HttpOnly
-// and signed, so this page cannot read it and could not be trusted if it could:
-// the name on the rows is whichever one the server verified, and showing a
-// different one in the corner would be a lie that is hard to notice.
+// A session ends when its database credential does, an hour after signing in,
+// and a restart ends it sooner. Every endpoint reports that the same way, so
+// it is handled in one place: the person goes back to sign in rather than
+// watching four panels fill with the same message.
+function endedSession(payload) {
+  return payload && payload.signed_out === true;
+}
+
 async function begin() {
   const session = await fetch("/api/session").then((r) => r.json()).catch(() => null);
 
-  // The route already redirects an unsigned visitor, so arriving here without a
-  // session means it expired between the page loading and this request, which
-  // a restart does. Back to the door rather than into an interface that will
-  // file everything under "guest".
+  // The route already redirects a visitor with no session, so arriving here
+  // without one means it ended between the page loading and this request.
   if (!session || !session.signed_in) {
     location.href = "/signin";
     return;
   }
 
-  $("who-name").textContent = session.name;
-  document.title = `MIBEL workbench, ${session.name}`;
+  $("who-name").textContent = session.email;
+  document.title = `MIBEL workbench, ${session.email}`;
   await Promise.all([loadEpisodes(), loadAlerts(), loadLabels(), loadActivity()]);
 }
 

@@ -73,40 +73,40 @@ def _explain(exc: Exception, doing: str) -> str:
 #: them could drift apart without anybody touching the server.
 SESSION_COOKIE = "mibel_session"
 
-#: A day. Long enough to label a batch of episodes over an evening, and the
-#: server's own secret ends the session sooner if it restarts.
-SESSION_MAX_AGE = 86400
+#: Sessions are opened by the Databricks callback in `app/main.py`, not here.
+#: This module reads them and ends them.
 
 
 # --- configuration -----------------------------------------------------------
 
 
-def _endpoint() -> str:
-    project = os.environ.get("LAKEBASE_PROJECT", "doriel-capstone-lakebase")
-    branch = os.environ.get("LAKEBASE_BRANCH", "production")
-    endpoint = os.environ.get("LAKEBASE_ENDPOINT_ID", "primary")
-    return f"projects/{project}/branches/{branch}/endpoints/{endpoint}"
+class SignedOut(Exception):
+    """No live session. Every route answers this the same way: sign in again."""
 
 
-@lru_cache(maxsize=1)
-def store():
-    """One Lakebase client for the process, so the credential cache is shared.
+def store_for(identity):
+    """A Lakebase client bound to one signed in person.
 
-    Cached rather than global so the first request pays for the import and a
-    misconfigured deployment fails on a request with a readable message instead
-    of at import time with a traceback in the deploy log.
+    Not cached, and not shared. Each session has its own credential and its own
+    Postgres role, so a client cached for the process would hand one reviewer's
+    connection to the next one and file their work under the wrong name.
+
+    The credential factory closes over a credential that cannot be refreshed:
+    this application threw away the token that would mint another. When it
+    expires the session is already gone, because the store expires it five
+    minutes earlier, and the person is sent back to sign in.
     """
-    from iberian.app.lakebase import Lakebase, databricks_credentials
+    from iberian.app.lakebase import Lakebase
 
     host = os.environ.get("LAKEBASE_HOST")
-    user = os.environ.get("LAKEBASE_USER")
-    if not host or not user:
+    if not host:
         raise RuntimeError(
-            "LAKEBASE_HOST and LAKEBASE_USER are not set, so the workbench "
-            "cannot reach its database."
+            "LAKEBASE_HOST is not set, so the workbench cannot reach its database."
         )
     return Lakebase(
-        host=host, user=user, credential_factory=databricks_credentials(_endpoint())
+        host=host,
+        user=identity.email,
+        credential_factory=lambda: identity.database_credential,
     )
 
 
@@ -119,67 +119,61 @@ def chat():
     )
 
 
-def actions_for(who: str, session_id: str):
-    from iberian.app.actions import Actions
+def actions_for(session_id: str):
+    """The write surface for one live session, or SignedOut.
 
-    return Actions(store=store(), session_id=session_id, created_by=who)
+    `created_by` is the email Databricks verified, never anything the browser
+    sent. That is what makes a stored judgement attributable.
+    """
+    from iberian.app.actions import Actions
+    from iberian.app.session import SESSIONS
+
+    identity = SESSIONS.get(session_id)
+    if identity is None:
+        raise SignedOut()
+    return Actions(
+        store=store_for(identity), session_id=session_id, created_by=identity.email
+    )
 
 
 # --- the visitor -------------------------------------------------------------
 
 
-def _session(raw: str | None) -> tuple[str, str]:
-    """The name and session in the cookie, or the anonymous pair.
+def _session_id(raw: str | None) -> str | None:
+    """The session id in a verified cookie, or None.
 
-    Every route calls this rather than trusting the cookie's contents, so a
-    cookie that was edited, or that was issued before the last restart, cannot
-    put a name on a row.
+    The email in the cookie is deliberately ignored here. It is signed, so it
+    is not forged, but the store holds the authoritative copy and reading it
+    from one place means the two can never disagree.
     """
     from iberian.app.session import verify
 
     found = verify(raw)
-    return found if found else ("guest", "anonymous")
-
-
-class Session(BaseModel):
-    name: str = Field(default="", max_length=60)
-
-
-@router.post("/session")
-def start_session(body: Session, response: Response) -> dict:
-    """Name yourself. No password, because nothing here is protected by one."""
-    from iberian.app.session import clean_name, new_session_id, sign
-
-    name = clean_name(body.name)
-    session_id = new_session_id()
-    # HttpOnly now that it is signed: the page asks `GET /session` for the name
-    # instead of reading the cookie, which costs one request and means the only
-    # copy of the name the browser can reach is the one the server just sent.
-    response.set_cookie(
-        SESSION_COOKIE,
-        sign(name, session_id),
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-    )
-    return {"name": name, "session_id": session_id}
+    return found[1] if found else None
 
 
 @router.get("/session")
 def current_session(mibel_session: str | None = Cookie(default=None)) -> dict:
-    """Who the server thinks you are, which is the only opinion that counts."""
-    from iberian.app.session import verify
+    """Who the server believes you are, which is the only opinion that counts."""
+    from iberian.app.session import SESSIONS
 
-    found = verify(mibel_session)
-    if found is None:
-        return {"signed_in": False, "name": "", "session_id": ""}
-    name, session_id = found
-    return {"signed_in": True, "name": name, "session_id": session_id}
+    identity = SESSIONS.get(_session_id(mibel_session))
+    if identity is None:
+        return {"signed_in": False, "email": ""}
+    return {"signed_in": True, "email": identity.email}
 
 
 @router.post("/signout")
-def sign_out(response: Response) -> dict:
-    """Forget the name. The rows stay, because they are somebody's judgements."""
+def sign_out(response: Response, mibel_session: str | None = Cookie(default=None)) -> dict:
+    """End the session and drop the credential with it.
+
+    The credential is discarded server side rather than only cleared from the
+    browser, so signing out actually ends the database access instead of hiding
+    the way back to it.
+    """
+    from iberian.app.session import SESSIONS
+
+    SESSIONS.close(_session_id(mibel_session))
     response.delete_cookie(SESSION_COOKIE, samesite="lax")
     return {"signed_in": False}
 
@@ -188,10 +182,18 @@ def sign_out(response: Response) -> dict:
 
 
 def _guard(work, doing: str = "reading") -> dict:
-    """Run a read, and turn any failure into something the page can show."""
+    """Run a read, and turn any failure into something the page can show.
+
+    An expired or missing session is not an error and is not logged as one. It
+    is the ordinary end of an hour's work, and the page answers it by sending
+    the person back to sign in.
+    """
     started = time.monotonic()
     try:
         return {"ok": True, "rows": work(), "ms": int((time.monotonic() - started) * 1000)}
+    except SignedOut:
+        return {"ok": False, "rows": [], "signed_out": True,
+                "error": "Your session has ended. Sign in again to continue."}
     except Exception as exc:
         return {"ok": False, "rows": [], "error": _explain(exc, doing)}
 
@@ -202,9 +204,8 @@ def episodes(
     unlabelled_only: bool = False,
     mibel_session: str | None = Cookie(default=None),
 ) -> dict:
-    who, session_id = _session(mibel_session)
     return _guard(
-        lambda: actions_for(who, session_id).list_episodes(
+        lambda: actions_for(_session_id(mibel_session)).list_episodes(
             limit=limit, unlabelled_only=unlabelled_only
         ),
         "listing episodes",
@@ -213,26 +214,33 @@ def episodes(
 
 @router.get("/alerts")
 def alerts(mibel_session: str | None = Cookie(default=None)) -> dict:
-    who, session_id = _session(mibel_session)
-    return _guard(lambda: actions_for(who, session_id).my_alerts(), "reading your alerts")
+    return _guard(
+        lambda: actions_for(_session_id(mibel_session)).my_alerts(), "reading your alerts"
+    )
 
 
 @router.get("/labels")
 def labels(mibel_session: str | None = Cookie(default=None)) -> dict:
-    who, session_id = _session(mibel_session)
-    return _guard(lambda: actions_for(who, session_id).my_labels(), "reading your judgements")
+    return _guard(
+        lambda: actions_for(_session_id(mibel_session)).my_labels(),
+        "reading your judgements",
+    )
 
 
 @router.get("/activity")
-def activity() -> dict:
+def activity(mibel_session: str | None = Cookie(default=None)) -> dict:
     """What the agent has been doing, for the analytics panel.
 
     Reads from `agent_actions` directly rather than from the Delta side, because
     the point of this panel is what happened a moment ago. The Delta copy, which
     arrives through the change feed, is what the daily aggregates are built from.
+
+    Everybody's activity, not only this session's: the panel is about how the
+    agent behaves, and a success rate computed over one person's afternoon says
+    less than one computed over everybody who has used it.
     """
     return _guard(
-        lambda: store().query(
+        lambda: _signed_in_store(_session_id(mibel_session)).query(
             """
             SELECT tool,
                    status,
@@ -246,6 +254,16 @@ def activity() -> dict:
         ),
         "reading the activity log",
     )
+
+
+def _signed_in_store(session_id: str | None):
+    """The database, as the signed in person, or SignedOut."""
+    from iberian.app.session import SESSIONS
+
+    identity = SESSIONS.get(session_id)
+    if identity is None:
+        raise SignedOut()
+    return store_for(identity)
 
 
 # --- writes ------------------------------------------------------------------
@@ -272,7 +290,7 @@ def create_alert(
     body: NewAlert,
     mibel_session: str | None = Cookie(default=None),
 ) -> dict:
-    actions = actions_for(*_session(mibel_session))
+    actions = actions_for(_session_id(mibel_session))
     return _result(
         actions.create_alert(body.zone, body.direction, body.threshold_eur_mwh)
     )
@@ -290,7 +308,7 @@ def delete_alert(
     conversation are the same action with the same safeguard, so a demonstration
     of one is a demonstration of both.
     """
-    actions = actions_for(*_session(mibel_session))
+    actions = actions_for(_session_id(mibel_session))
     return _result(actions.delete_alert(alert_id, confirmed=confirmed))
 
 
@@ -306,7 +324,7 @@ def submit_label(
     body: NewLabel,
     mibel_session: str | None = Cookie(default=None),
 ) -> dict:
-    actions = actions_for(*_session(mibel_session))
+    actions = actions_for(_session_id(mibel_session))
     return _result(
         actions.submit_episode_label(
             body.episode_key, body.true_cause, body.confidence, body.notes
@@ -334,10 +352,8 @@ def ask(
 ) -> dict:
     from iberian.app.assistant import Assistant
 
-    who, session_id = _session(mibel_session)
-
     try:
-        assistant = Assistant(actions=actions_for(who, session_id), chat=chat())
+        assistant = Assistant(actions=actions_for(_session_id(mibel_session)), chat=chat())
         turn = assistant.ask(
             body.question,
             history=[

@@ -35,7 +35,7 @@ Configuration, all from the environment:
     APP_OAUTH_CLIENT_ID       from the app integration
     APP_OAUTH_CLIENT_SECRET   from the app integration
     DATABRICKS_REDIRECT_URI   must match a registered redirect URL exactly
-    DATABRICKS_SCOPES         space separated, defaults to "postgres"
+    DATABRICKS_SCOPES         space separated, defaults to "all-apis"
 
 The two credentials are deliberately NOT called DATABRICKS_CLIENT_ID and
 DATABRICKS_CLIENT_SECRET. The Databricks SDK and CLI treat those names as a
@@ -55,7 +55,6 @@ import os
 import secrets
 import time
 import urllib.parse
-from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -92,7 +91,11 @@ HOST = (os.environ.get("DATABRICKS_HOST") or "").rstrip("/")
 CLIENT_ID = os.environ.get("APP_OAUTH_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("APP_OAUTH_CLIENT_SECRET", "")
 REDIRECT_URI = os.environ.get("DATABRICKS_REDIRECT_URI", "")
-SCOPES = os.environ.get("DATABRICKS_SCOPES", "postgres")
+# all-apis rather than postgres. The callback calls the workspace API to
+# generate a database credential, and a token scoped only to Postgres cannot
+# make that call. The token this buys is broad, which is precisely why the
+# callback spends it immediately and keeps only what it produced.
+SCOPES = os.environ.get("DATABRICKS_SCOPES", "all-apis")
 
 AUTHORIZE_URL = f"{HOST}/oidc/v1/authorize"
 TOKEN_URL = f"{HOST}/oidc/v1/token"
@@ -155,6 +158,57 @@ def decode_claims(token: str) -> dict:
         return json.loads(base64.urlsafe_b64decode(payload + padding))
     except Exception:
         return {}
+
+
+#: The cookie is allowed to outlive the credential it points at, on purpose. A
+#: browser holding a cookie whose session has expired gets a clean redirect to
+#: sign in; a browser with no cookie at all gets the same thing with no way to
+#: say why. The first is a better page to land on.
+SESSION_COOKIE_SECONDS = 8 * 3600
+
+#: Which Lakebase endpoint the credential is generated for. Same shape as the
+#: notebooks use, and read from the environment for the same reason.
+def lakebase_endpoint() -> str:
+    """Which Lakebase endpoint a credential is generated for.
+
+    No defaults. A fallback here would be one person's project name compiled
+    into a public repository, and worse, a misconfigured deployment would point
+    at it and fail somewhere confusing instead of at start up with a name.
+    """
+    missing = [
+        name
+        for name in ("LAKEBASE_PROJECT", "LAKEBASE_BRANCH", "LAKEBASE_ENDPOINT_ID")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Not configured: {', '.join(missing)}. The workbench cannot "
+            "generate a database credential without knowing which endpoint."
+        )
+    return (
+        f"projects/{os.environ['LAKEBASE_PROJECT']}"
+        f"/branches/{os.environ['LAKEBASE_BRANCH']}"
+        f"/endpoints/{os.environ['LAKEBASE_ENDPOINT_ID']}"
+    )
+
+
+def database_credential_for(access_token: str) -> str:
+    """Spend a person's platform token on one Lakebase credential.
+
+    The SDK client is built around the token rather than the environment, so
+    this call is made as the person who signed in and not as whatever identity
+    the process happens to be configured with. That is the whole point: the
+    database sees the reviewer, and their own grants decide what they can do.
+
+    Imported here rather than at module scope so the dashboard half of this
+    service still starts on a host without the SDK installed.
+    """
+    from databricks.sdk import WorkspaceClient
+
+    workspace = WorkspaceClient(host=HOST, token=access_token, auth_type="pat")
+    return workspace.postgres.generate_database_credential(
+        endpoint=lakebase_endpoint()
+    ).token
 
 
 def page(title: str, body: str) -> HTMLResponse:
@@ -222,9 +276,16 @@ def workbench(mibel_session: str | None = Cookie(default=None)):
     show the visitor a working interface for a moment and then take it away,
     which looks like a fault rather than a redirect.
     """
-    from iberian.app.session import verify
+    from iberian.app.session import SESSIONS, verify
 
-    if verify(mibel_session) is None:
+    # Both checks, and the second is the one that matters. A signature only
+    # proves this server issued the cookie at some point; the store is what
+    # knows whether the session behind it is still alive. Serving the page on
+    # the signature alone would show a working interface to somebody who has
+    # signed out or whose hour is up, and then take it away once the first
+    # request came back empty.
+    found = verify(mibel_session)
+    if found is None or SESSIONS.get(found[1]) is None:
         return RedirectResponse("/signin", status_code=303)
 
     page_file = PUBLIC / "workbench.html"
@@ -379,33 +440,52 @@ def callback(
             "including the scheme and any trailing slash.</p>",
         )
 
+    from iberian.app.session import SESSIONS, sign
+
     claims = decode_claims(body["access_token"])
-    expires = claims.get("exp")
-    when = (
-        datetime.fromtimestamp(expires, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        if expires
-        else "unknown"
-    )
+    email = claims.get("sub") or ""
+    if not email:
+        return page(
+            "Sign in failed",
+            '<h1 class="bad">The token names nobody</h1>'
+            "<p>The exchange succeeded but the token carries no subject, so "
+            "there is no identity to attribute work to.</p>"
+            '<p><a href="/signin">Back</a></p>',
+        )
 
-    rows = {
-        "Signed in as": claims.get("sub", "unknown"),
-        "Scopes granted": claims.get("scope") or "not stated",
-        "Issued by": claims.get("iss", "unknown"),
-        "Valid until": when,
-        "Refresh token": "yes" if body.get("refresh_token") else "no",
-    }
-    table = "".join(
-        f"<tr><td><strong>{html.escape(k)}</strong></td>"
-        f"<td><code>{html.escape(str(v))}</code></td></tr>"
-        for k, v in rows.items()
-    )
+    # The one use this application makes of the platform token. It carries the
+    # person's whole workspace, so it is spent here and not kept: what is stored
+    # is the Lakebase credential it produces, which opens a database connection
+    # as that person and does nothing else.
+    try:
+        credential = database_credential_for(body["access_token"])
+    except Exception as exc:
+        return page(
+            "Signed in, but the database refused",
+            '<h1 class="bad">Databricks knows you, Lakebase does not</h1>'
+            f"<p>Signed in as <code>{html.escape(email)}</code>, but generating "
+            "a database credential failed.</p>"
+            f"<pre>{html.escape(str(exc)[:600])}</pre>"
+            "<p>The usual cause is that this identity has no Postgres role in "
+            "the project yet. A role is a database object and workspace "
+            "permissions do not create one.</p>"
+            '<p><a href="/signin">Back</a></p>',
+        )
+    finally:
+        # Belt and braces. The local name is the only reference this function
+        # holds, and it goes out of scope anyway, but saying so here is how the
+        # next person reading this knows it was a decision.
+        body.pop("access_token", None)
+        body.pop("refresh_token", None)
 
-    return page(
-        "Signed in",
-        '<h1 class="ok">Databricks sign in works</h1>'
-        f"<table>{table}</table>"
-        "<p>The access token is held in memory and is not shown here.</p>"
-        "<p>A token is not data access. Reaching Lakebase still needs the "
-        "endpoint details and a Postgres role with grants on the gold "
-        'tables.</p><p><a href="/auth">Back</a></p>',
+    session_id = SESSIONS.open(email=email, database_credential=credential)
+
+    response = RedirectResponse("/workbench", status_code=303)
+    response.set_cookie(
+        "mibel_session",
+        sign(email, session_id),
+        max_age=SESSION_COOKIE_SECONDS,
+        httponly=True,
+        samesite="lax",
     )
+    return response
