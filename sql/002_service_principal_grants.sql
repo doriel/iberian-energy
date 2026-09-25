@@ -14,15 +14,19 @@
 -- an administrator.
 --
 -- Applied by `pipelines/00c_grant_service_principal.py`. The role itself is
--- created there, in Python, because `databricks_create_role` is a Lakebase
--- function whose behaviour when the role already exists is not documented, and
--- an error caught with a readable message beats a file that only works once.
+-- created there, through `w.postgres.create_role`, and not here: this Lakebase
+-- generation manages roles as API resources rather than with SQL, and the
+-- `databricks_create_role` function the older documentation reaches for does
+-- not exist in this database at all.
 --
--- `:"principal"` is the service principal's application id. Postgres cannot
--- parameterise an identifier, so the notebook substitutes it textually after
--- checking it is a UUID. Everything below is idempotent: a GRANT already held
--- is a no op, so running this again after adding a table is the normal way to
--- use it.
+-- `:"principal"` is the role's `postgres_role`, the name it connects as, which
+-- the notebook reads back from the API rather than assumes. For a user role
+-- that is the whole email while the role id is only the local part, so the two
+-- are not interchangeable. Postgres cannot parameterise an identifier, so it is
+-- substituted as text after being checked.
+--
+-- Everything below is idempotent: a GRANT already held is a no op, so running
+-- this again after adding a table is the normal way to use it.
 
 GRANT CONNECT ON DATABASE databricks_postgres TO :"principal";
 GRANT USAGE ON SCHEMA iberian TO :"principal";
