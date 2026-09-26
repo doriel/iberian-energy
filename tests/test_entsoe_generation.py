@@ -40,6 +40,7 @@ def series(
     name="Almaraz I",
     psr="B14",
     start="2026-09-23T00:00Z",
+    end="2026-09-24T00:00Z",
     resolution="PT60M",
     quantities=(950.0, 948.0),
     first_position=1,
@@ -76,7 +77,7 @@ def series(
         f"<PowerSystemResources><mRID>{unit}</mRID><name>{name}</name>"
         "</PowerSystemResources></MktPSRType>"
         f"<Period><timeInterval><start>{start}</start>"
-        "<end>2026-09-24T00:00Z</end></timeInterval>"
+        f"<end>{end}</end></timeInterval>"
         f"<resolution>{resolution}</resolution>{points}</Period>"
         "</TimeSeries>"
     )
@@ -213,6 +214,46 @@ def test_the_curve_type_is_carried_so_the_gap_rule_is_visible():
     position. Nothing here expands those, so the column has to say so."""
     rows = generation_points(document(series(curve_type="A03")), zone="ES")
     assert rows[0].curve_type == "A03"
+
+
+def test_the_period_end_is_carried_on_every_row():
+    """The last A03 block of a period holds until this instant, and a consumer
+    without it has to guess where the day stops."""
+    rows = generation_points(document(series()), zone="ES")
+    assert all(
+        row.period_end_utc == datetime(2026, 9, 24, tzinfo=timezone.utc) for row in rows
+    )
+
+
+def test_a_period_that_stops_early_says_so_rather_than_running_to_midnight():
+    """The case the column exists for.
+
+    A unit that stopped reporting at noon has a period that ends at noon. The
+    two guesses somebody would otherwise make, one resolution step or the end
+    of the calendar day, disagree by twelve hours, and one of them would show a
+    plant producing through an afternoon it published nothing for.
+    """
+    rows = generation_points(
+        document(series(end="2026-09-23T12:00Z", quantities=(950.0,))), zone="ES"
+    )
+    assert rows[0].period_end_utc == at(12)
+
+
+def test_a_period_with_no_end_leaves_it_null_rather_than_inventing_one():
+    xml = document(
+        "<TimeSeries><curveType>A03</curveType>"
+        "<MktPSRType><psrType>B16</psrType>"
+        "<PowerSystemResources><mRID>48W0000000SOL-1</mRID><name>Solar</name>"
+        "</PowerSystemResources></MktPSRType>"
+        "<Period><timeInterval><start>2026-09-23T00:00Z</start></timeInterval>"
+        "<resolution>PT60M</resolution>"
+        "<Point><position>1</position><quantity>5</quantity></Point></Period>"
+        "</TimeSeries>"
+    )
+    rows = generation_points(xml, zone="ES")
+
+    assert len(rows) == 1
+    assert rows[0].period_end_utc is None
 
 
 # --- timestamps, which is where a silent error would live ----------------------
@@ -414,7 +455,7 @@ def test_rows_carry_every_column_the_silver_table_needs():
     assert set(row) == {
         "zone", "unit_eic", "unit_name", "psr_type", "psr_label",
         "flow_direction", "ts_utc", "resolution_minutes", "quantity_mw",
-        "position", "curve_type",
+        "position", "curve_type", "period_end_utc",
     }
 
 

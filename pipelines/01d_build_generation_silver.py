@@ -173,6 +173,7 @@ POINT = T.StructType(
         T.StructField("quantity_mw", T.DoubleType()),
         T.StructField("position", T.IntegerType()),
         T.StructField("curve_type", T.StringType()),
+        T.StructField("period_end_utc", T.TimestampType()),
     ]
 )
 
@@ -247,6 +248,7 @@ rows = (
         F.col("point.quantity_mw").alias("quantity_mw"),
         F.col("point.position").alias("position"),
         F.col("point.curve_type").alias("curve_type"),
+        F.col("point.period_end_utc").alias("period_end_utc"),
     )
     # A partition column, so a year of data does not have to be read to answer a
     # question about one month. Month rather than day: 728 daily partitions of
@@ -305,6 +307,11 @@ COMMENTS = {
                   "published point holds until the next position. Nothing here "
                   "expands those blocks, so carrying a value forward is a decision "
                   "for whoever aggregates, made in the open.",
+    "period_end_utc": "End of the period this reading belongs to, from the document. "
+                      "The last A03 block of a period holds until here. Carried so "
+                      "the gold layer expands blocks exactly rather than guessing "
+                      "between one resolution step and the end of the calendar day, "
+                      "which disagree by hours when a unit stops reporting at noon.",
     "market_day": "The day the document covers, from the ingestion path.",
     "market_month": "Partition column.",
 }

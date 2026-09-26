@@ -45,10 +45,10 @@ the production type, the direction and the timestamp.
 `A03`, a variable sized block, where a published point holds until the next
 published position rather than the series being dense. Nothing here expands
 those blocks: a repeated value and a measured one are different things, and the
-difference matters to somebody counting how much a plant ran. Gaps stay gaps and
-`curve_type` is a column, so whoever aggregates can decide to carry a value
-forward with a window function, visibly, rather than inherit a decision made
-here.
+difference matters to somebody counting how much a plant ran. Gaps stay gaps,
+and `curve_type` and `period_end_utc` are columns, so whoever aggregates can
+carry a value forward with a window function, knowing exactly where the last
+block of each period stops, rather than inheriting a decision made here.
 """
 
 from __future__ import annotations
@@ -126,6 +126,7 @@ class GenerationPoint:
     quantity_mw: float
     position: int
     curve_type: str
+    period_end_utc: datetime | None
 
     def as_row(self) -> dict:
         return {
@@ -140,6 +141,7 @@ class GenerationPoint:
             "quantity_mw": self.quantity_mw,
             "position": self.position,
             "curve_type": self.curve_type,
+            "period_end_utc": self.period_end_utc,
         }
 
 
@@ -287,6 +289,16 @@ def generation_points(xml: str, zone: str) -> list[GenerationPoint]:
             if start is None:
                 continue
 
+            # The period end is carried on every row rather than left here.
+            # With curveType A03 the last published point of a period holds
+            # until that end, and a consumer that does not know where the
+            # period stops has to guess. The two reasonable guesses, one
+            # resolution step and the end of the calendar day, disagree by
+            # hours on a day where a unit stopped reporting at noon.
+            period_end = _parse_instant(
+                period.findtext(f"{tag('timeInterval')}/{tag('end')}")
+            )
+
             resolution = (period.findtext(tag("resolution")) or "").strip()
             minutes = RESOLUTION_MINUTES.get(resolution)
 
@@ -323,6 +335,7 @@ def generation_points(xml: str, zone: str) -> list[GenerationPoint]:
                         quantity_mw=quantity,
                         position=position,
                         curve_type=curve_type,
+                        period_end_utc=period_end,
                     )
                 )
 
