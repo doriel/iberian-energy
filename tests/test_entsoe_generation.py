@@ -22,6 +22,11 @@ from iberian.parsing.entsoe_generation import (  # noqa: E402
 
 NS = "urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0"
 
+#: The Portuguese control area, as the real documents write it. Both the
+#: generation and the consumption series carry this same value, which is the
+#: point: which element holds it is the information, not what it says.
+PT_ZONE = "10YPT-REN------W"
+
 
 def document(*series: str) -> str:
     return (
@@ -38,14 +43,35 @@ def series(
     resolution="PT60M",
     quantities=(950.0, 948.0),
     first_position=1,
+    direction="in",
+    business_type="A01",
+    curve_type="A03",
 ) -> str:
+    """One TimeSeries, shaped like the ones ENTSO-E actually sends.
+
+    `direction` is "in", "out" or "none": the real documents carry exactly one
+    of the two bidding zone elements, and "none" exists to pin down what this
+    module does with a document that carries neither.
+    """
     points = "".join(
         f"<Point><position>{first_position + index}</position>"
         f"<quantity>{value}</quantity></Point>"
         for index, value in enumerate(quantities)
     )
+    zone_element = {
+        "in": f'<inBiddingZone_Domain.mRID codingScheme="A01">{PT_ZONE}'
+              "</inBiddingZone_Domain.mRID>",
+        "out": f'<outBiddingZone_Domain.mRID codingScheme="A01">{PT_ZONE}'
+               "</outBiddingZone_Domain.mRID>",
+        "none": "",
+    }[direction]
     return (
         "<TimeSeries>"
+        f"<mRID>1</mRID><businessType>{business_type}</businessType>"
+        "<objectAggregation>A06</objectAggregation>"
+        f"{zone_element}"
+        "<quantity_Measure_Unit.name>MAW</quantity_Measure_Unit.name>"
+        f"<curveType>{curve_type}</curveType>"
         f"<MktPSRType><psrType>{psr}</psrType>"
         f"<PowerSystemResources><mRID>{unit}</mRID><name>{name}</name>"
         "</PowerSystemResources></MktPSRType>"
@@ -92,6 +118,103 @@ def test_the_zone_comes_from_the_caller():
     assert {row.zone for row in rows} == {"PT"}
 
 
+# --- generation and consumption, which is where the duplicates came from -------
+
+
+def test_a_series_flowing_into_the_zone_is_generation():
+    rows = generation_points(document(series(direction="in")), zone="PT")
+    assert {row.flow_direction for row in rows} == {"generation"}
+
+
+def test_a_series_flowing_out_of_the_zone_is_consumption():
+    rows = generation_points(document(series(direction="out")), zone="PT")
+    assert {row.flow_direction for row in rows} == {"consumption"}
+
+
+def test_a_unit_publishing_both_directions_gives_two_distinguishable_rows():
+    """The bug this column exists for.
+
+    Aguieira publishes generation and consumption for the same unit, the same
+    production type and the same hour, as two TimeSeries. Without the direction
+    they collapse onto one key, and deduplicating them would erase half of what
+    pumped storage does.
+    """
+    xml = document(
+        series(unit="16WAGUIE1------O", psr="B10", direction="out", quantities=(2.4,)),
+        series(unit="16WAGUIE1------O", psr="B10", direction="in", quantities=(45.2,)),
+    )
+    rows = generation_points(xml, zone="PT")
+
+    assert len(rows) == 2
+    assert {row.ts_utc for row in rows} == {at(0)}
+    assert {row.flow_direction for row in rows} == {"consumption", "generation"}
+
+    keys = {
+        (row.zone, row.unit_eic, row.psr_type, row.flow_direction, row.ts_utc)
+        for row in rows
+    }
+    assert len(keys) == 2, "the direction has to make the key unique"
+
+
+def test_consumption_is_not_limited_to_pumped_storage():
+    """Measured, not assumed. On 2025-09-26 the Lares combined cycle and the
+    Carrapatelo run-of-river station both published their own consumption."""
+    xml = document(
+        series(unit="16WLARES2------3", psr="B04", direction="out", quantities=(2.6,)),
+        series(unit="16WCARRA3------X", psr="B11", direction="out", quantities=(0.0,)),
+    )
+    rows = generation_points(xml, zone="PT")
+
+    assert [row.flow_direction for row in rows] == ["consumption", "consumption"]
+
+
+def test_the_business_type_is_not_what_decides():
+    """Both series carry A01, checked against a real document. A parser that
+    keyed on businessType would look right and change nothing."""
+    xml = document(
+        series(direction="out", business_type="A01", quantities=(1.0,)),
+        series(direction="in", business_type="A01", quantities=(2.0,)),
+    )
+    rows = generation_points(xml, zone="PT")
+    assert {row.flow_direction for row in rows} == {"consumption", "generation"}
+
+
+def test_consumption_keeps_the_sign_the_document_published():
+    """It arrives positive in its own series, and is left positive.
+
+    Flipping it to negative would be this module inventing an encoding the
+    publisher did not use, and it would make a naive SUM look correct while
+    hiding that two different quantities are being added together.
+    """
+    rows = generation_points(
+        document(series(psr="B10", direction="out", quantities=(45.2,))), zone="PT"
+    )
+    assert rows[0].quantity_mw == 45.2
+    assert rows[0].flow_direction == "consumption"
+
+
+def test_a_series_with_neither_element_is_read_as_generation():
+    """A documented default rather than a reading, and the safe one: a null in
+    a key column is worse, and the duplicate check would surface it."""
+    rows = generation_points(document(series(direction="none")), zone="ES")
+    assert {row.flow_direction for row in rows} == {"generation"}
+
+
+def test_the_dot_in_the_element_name_does_not_defeat_the_lookup():
+    """`inBiddingZone_Domain.mRID` contains a dot, and ElementTree's path syntax
+    gives a dot its own meaning. This is here because a `find` would silently
+    match nothing and every row would come back as generation."""
+    rows = generation_points(document(series(direction="out")), zone="PT")
+    assert rows[0].flow_direction == "consumption"
+
+
+def test_the_curve_type_is_carried_so_the_gap_rule_is_visible():
+    """A03 is a variable sized block: a published point holds until the next
+    position. Nothing here expands those, so the column has to say so."""
+    rows = generation_points(document(series(curve_type="A03")), zone="ES")
+    assert rows[0].curve_type == "A03"
+
+
 # --- timestamps, which is where a silent error would live ----------------------
 
 
@@ -130,10 +253,13 @@ def test_a_sparse_first_position_is_not_treated_as_the_start():
 
 
 def test_a_gap_stays_a_gap():
-    """ENTSO-E's A01 curve repeats a missing position. This does not.
+    """The documents carry curveType A03, where a point holds until the next
+    published position. This does not expand those blocks.
 
     A repeated value and a measured one are different things, and the
-    difference matters to anybody counting how much a plant ran.
+    difference matters to anybody counting how much a plant ran. Carrying a
+    value forward is a decision for whoever aggregates, made in the open with a
+    window function, not one inherited silently from the parser.
     """
     xml = document(
         series(resolution="PT60M", quantities=(100,), first_position=1),
@@ -192,8 +318,9 @@ def test_a_unit_appearing_twice_is_not_deduplicated():
     assert {row.psr_type for row in rows} == {"B04", "B10"}
 
 
-def test_negative_generation_is_kept():
-    """Pumped storage consuming is real, and clamping it to zero hides it."""
+def test_a_negative_quantity_is_kept_rather_than_clamped():
+    """Consumption arrives as its own positive series, so a negative here is
+    something else. Whatever it is, it is what the document said."""
     rows = generation_points(document(series(psr="B10", quantities=(-45.5,))), zone="ES")
     assert rows[0].quantity_mw == -45.5
 
@@ -271,6 +398,14 @@ def test_a_document_with_a_different_schema_version_still_parses():
     assert len(generation_points(xml, zone="ES")) == 2
 
 
+def test_the_direction_survives_a_schema_version_bump():
+    """The direction is read by local name, so it does not depend on the URI."""
+    xml = document(series(direction="out")).replace(
+        "generationloaddocument:3:0", "generationloaddocument:4:2"
+    )
+    assert generation_points(xml, zone="ES")[0].flow_direction == "consumption"
+
+
 # --- the shapes handed on ------------------------------------------------------
 
 
@@ -278,7 +413,8 @@ def test_rows_carry_every_column_the_silver_table_needs():
     row = generation_rows(document(series()), zone="ES")[0]
     assert set(row) == {
         "zone", "unit_eic", "unit_name", "psr_type", "psr_label",
-        "ts_utc", "resolution_minutes", "quantity_mw", "position",
+        "flow_direction", "ts_utc", "resolution_minutes", "quantity_mw",
+        "position", "curve_type",
     }
 
 
