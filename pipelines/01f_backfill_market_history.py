@@ -520,13 +520,22 @@ if failed:
 # MAGIC %md
 # MAGIC ## Next
 # MAGIC
-# MAGIC Run the declarative pipeline. It is the object the `transform` task of
-# MAGIC the `iberian-daily` Job triggers: a Lakeflow pipeline that lives in the
-# MAGIC workspace under Jobs & Pipelines, referenced by the bundle as
-# MAGIC `pipeline_id` rather than defined in it. Start it directly rather than
-# MAGIC running the whole Job: the Job would also run `explain`, which spends
-# MAGIC model calls on the new episodes, and `publish`, which commits the
-# MAGIC dashboard to GitHub before anybody has looked at the numbers.
+# MAGIC Start `Iberian_01`, the Lakeflow declarative pipeline. It is not a Job
+# MAGIC and not a notebook: a separate object in the workspace, listed under
+# MAGIC Jobs & Pipelines, whose source is `pipelines/transformations/` and which
+# MAGIC owns every table from bronze onwards. The `transform` task of the
+# MAGIC `iberian-daily` Job triggers it; the bundle references it by id as
+# MAGIC `pipeline_id` because it is still created in the workspace rather than
+# MAGIC by the bundle.
+# MAGIC
+# MAGIC Start it directly rather than running the whole Job. The Job would also
+# MAGIC run `explain`, which spends model calls on the new episodes, and
+# MAGIC `publish`, which commits the dashboard to GitHub before anybody has
+# MAGIC looked at the numbers.
+# MAGIC
+# MAGIC Plain **Start**, not **Full refresh**. Start reads only the files Auto
+# MAGIC Loader has not seen and recomputes the materialized views, which is
+# MAGIC everything this needs. Full refresh re-reads every file ever landed.
 # MAGIC
 # MAGIC Auto Loader reads only the files it has not seen, so it parses the
 # MAGIC backfill into silver and recomputes gold from the larger silver. Nothing

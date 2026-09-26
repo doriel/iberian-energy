@@ -31,7 +31,7 @@
 # MAGIC limited API. It is also what let sixty market days be rebuilt from disk
 # MAGIC without asking ENTSO-E for any of it again.
 # MAGIC
-# MAGIC **Run order**: this notebook, then the declarative pipeline. As a Job,
+# MAGIC **Run order**: this notebook, then the `Iberian_01` pipeline. As a Job,
 # MAGIC two tasks with the pipeline depending on this one.
 # MAGIC
 # MAGIC The ingestion and parsing logic lives in `src/iberian/` as plain Python
@@ -385,10 +385,12 @@ for folder in ("entsoe/day_ahead_prices", "entsoe/crossborder", "omie",
 # MAGIC %md
 # MAGIC ## Next
 # MAGIC
-# MAGIC Run the declarative pipeline, the one the `transform` task of the
-# MAGIC `iberian-daily` Job triggers. It is a separate object in the workspace,
-# MAGIC listed under Jobs & Pipelines, and the bundle references it by id as
-# MAGIC `pipeline_id`. Auto Loader picks up only the files it has
+# MAGIC Run `Iberian_01`. It is a Lakeflow declarative pipeline, not a Job and
+# MAGIC not a notebook: a separate object in the workspace, listed under Jobs &
+# MAGIC Pipelines, whose source is `pipelines/transformations/`. The
+# MAGIC `transform` task of the `iberian-daily` Job triggers it, and the bundle
+# MAGIC references it by id as `pipeline_id` because it is still created in the
+# MAGIC workspace rather than by the bundle. Auto Loader picks up only the files it has
 # MAGIC not seen, parses them into silver and rebuilds gold.
 # MAGIC
 # MAGIC As a scheduled Job this notebook is task one and the pipeline is task
