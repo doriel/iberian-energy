@@ -40,12 +40,21 @@
 # MAGIC published about two and a half hours earlier. Spain is denser: a median
 # MAGIC of 15 minutes and a 95th percentile of 60.
 # MAGIC
-# MAGIC That is not an error. With A03 the publisher is asserting the value held.
-# MAGIC But "REN says it still held" and "it was measured at 19:00" are different
-# MAGIC claims, and an outage attribution built on a figure last published at
-# MAGIC dawn is weaker evidence than one built on a reading taken in the hour.
-# MAGIC So `published_at_utc` and `source_block_minutes` travel with every row,
-# MAGIC and the agent can tell which kind of number it is holding.
+# MAGIC That is not an error. With A03 the publisher is asserting the value
+# MAGIC held, so a held figure is a published claim rather than an interpolation.
+# MAGIC
+# MAGIC It is worth being precise about what this does and does not mean for the
+# MAGIC offline signal, because the obvious reading is the wrong one. Only 3 per
+# MAGIC cent of the hours flagged as looking offline have a zero published in
+# MAGIC that hour: 5,358 of 179,869. That is not the signal being weak. It is the
+# MAGIC encoding working as designed. A plant that stops publishes one zero and
+# MAGIC lets it stand, and a plant that published a fresh zero every quarter hour
+# MAGIC would be the odd case. The freshness of a zero is not a quality score.
+# MAGIC
+# MAGIC Where these two columns do earn their place is the opposite case. An
+# MAGIC `output_mw` of 45 MW carried across fifteen hours is a claim the
+# MAGIC publisher maintained, not a reading taken in the hour, and anything that
+# MAGIC quotes the figure as a measurement should be able to tell the two apart.
 # MAGIC
 # MAGIC ## Hourly means are time weighted
 # MAGIC
@@ -578,7 +587,11 @@ print("\nby production type:")
     .show(10, truncate=False)
 )
 
-print("offline hours by how fresh the zero is, which is what the agent needs:")
+# A held zero is the normal way a stopped plant is published, so a low count in
+# the "published in this hour" row is expected. Measured on the run that built
+# this table: 3 per cent, 5,358 of 179,869. It is here to be seen rather than
+# assumed, not because a held zero is worth less than a fresh one.
+print("offline hours by how fresh the zero is:")
 (
     gold.filter(F.col("looks_offline"))
     .withColumn(
