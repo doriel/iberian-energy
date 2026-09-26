@@ -477,18 +477,32 @@ print(f"failed             {len(failed):>6}")
 print(f"bytes this run     {total_bytes / 1e6:>6.1f} MB")
 print()
 
+def count_files(path: str) -> int:
+    """Files under a prefix, however deep.
+
+    Recursive because the folders are not all the same depth: prices are
+    `zone=PT/file` and cross-border is `kind=A09/dir=ES_to_PT/file`. A fixed
+    two level walk counts directories for the second one and reports six files
+    where there are dozens, which is a wrong number printed with confidence.
+    """
+    total = 0
+    try:
+        entries = dbutils.fs.ls(path)
+    except Exception:
+        return 0
+    for entry in entries:
+        # dbutils marks a directory by a trailing slash on the name.
+        if entry.name.endswith("/"):
+            total += count_files(entry.path)
+        else:
+            total += 1
+    return total
+
+
 for folder in ("entsoe/day_ahead_prices", "entsoe/crossborder", "omie",
                "open_meteo", "esios"):
-    try:
-        count = 0
-        for entry in dbutils.fs.ls(f"{VOLUME_ROOT}/{folder}"):
-            try:
-                count += len(dbutils.fs.ls(entry.path))
-            except Exception:
-                count += 1
-        print(f"  {folder:<28} {count:>5} files")
-    except Exception:
-        print(f"  {folder:<28} not present")
+    found = count_files(f"{VOLUME_ROOT}/{folder}")
+    print(f"  {folder:<28} {found:>5} files" if found else f"  {folder:<28} not present")
 
 if failed:
     print(f"\nFailed ({len(failed)}), and these are gaps worth re-running:")
@@ -506,9 +520,17 @@ if failed:
 # MAGIC %md
 # MAGIC ## Next
 # MAGIC
-# MAGIC Run the `Iberian_01` pipeline. Auto Loader reads only the files it has
-# MAGIC not seen, so it parses the backfill into silver and recomputes gold from
-# MAGIC the larger silver. Nothing in `pipelines/transformations/` changes.
+# MAGIC Run the declarative pipeline. It is the object the `transform` task of
+# MAGIC the `iberian-daily` Job triggers: a Lakeflow pipeline that lives in the
+# MAGIC workspace under Jobs & Pipelines, referenced by the bundle as
+# MAGIC `pipeline_id` rather than defined in it. Start it directly rather than
+# MAGIC running the whole Job: the Job would also run `explain`, which spends
+# MAGIC model calls on the new episodes, and `publish`, which commits the
+# MAGIC dashboard to GitHub before anybody has looked at the numbers.
+# MAGIC
+# MAGIC Auto Loader reads only the files it has not seen, so it parses the
+# MAGIC backfill into silver and recomputes gold from the larger silver. Nothing
+# MAGIC in `pipelines/transformations/` changes.
 # MAGIC
 # MAGIC Expect `gold_split_episodes` to grow. Existing episodes keep their keys,
 # MAGIC so labels, published explanations and the evaluation set are untouched.
