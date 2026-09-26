@@ -138,7 +138,7 @@ def is_acknowledgement(xml: str) -> tuple[bool, str]:
     code, so a caller that only checks for an exception treats "no data for
     this day" as success and lands an empty file.
     """
-    head = xml[:4000]
+    head = xml.lstrip("\ufeff \t\r\n")[:4000]
     if "Acknowledgement_MarketDocument" not in head:
         return False, ""
     reason = ""
@@ -162,7 +162,22 @@ def generation_points(xml: str, zone: str) -> list[GenerationPoint]:
     if declined:
         return []
 
-    root = ET.fromstring(xml)
+    # A byte order mark or leading whitespace before the declaration makes
+    # ElementTree refuse the whole document, and ENTSO-E sends both.
+    text = xml.lstrip("\ufeff \t\r\n")
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        # The message this replaces is "no element found: line 1, column 0",
+        # which is true and useless. The overwhelmingly likely cause is a
+        # fragment rather than a document, and the reader is where that starts.
+        raise ValueError(
+            f"Not a parseable XML document: {exc}. It starts {text[:60]!r}. "
+            "A fragment rather than a whole document usually means the file was "
+            "read a line at a time: pass wholetext=True to spark.read.text, as "
+            "a parameter rather than as an option."
+        ) from exc
     ns = _namespace(root)
     tag = (lambda name: f"{{{ns}}}{name}") if ns else (lambda name: name)
 

@@ -293,3 +293,54 @@ def test_the_unit_dimension_is_discovered_from_the_data():
         "48W000000ALMA-1F": "Almaraz I",
         "16W-ALQUE1-----X": "Alqueva - G1",
     }
+
+
+# --- documents that are not quite documents ------------------------------------
+
+
+def test_a_byte_order_mark_does_not_stop_it():
+    """ENTSO-E sends them. The older parser strips one, which is how we know."""
+    rows = generation_points("﻿" + document(series()), zone="ES")
+    assert len(rows) == 2
+
+
+def test_leading_whitespace_does_not_stop_it():
+    """ElementTree refuses a declaration that is not at the very start."""
+    rows = generation_points("\n  " + document(series()), zone="ES")
+    assert len(rows) == 2
+
+
+def test_an_acknowledgement_behind_a_byte_order_mark_is_still_recognised():
+    xml = "﻿" + (
+        '<?xml version="1.0"?><Acknowledgement_MarketDocument>'
+        "<Reason><text>No matching data found</text></Reason>"
+        "</Acknowledgement_MarketDocument>"
+    )
+    declined, reason = is_acknowledgement(xml)
+    assert declined is True
+    assert reason == "No matching data found"
+
+
+def test_a_fragment_says_what_probably_happened():
+    """The failure that cost an afternoon, turned into a message.
+
+    Reading the files a line at a time instead of whole gives the parser an XML
+    declaration on its own. ElementTree's own message is "no element found",
+    which is true and points nowhere.
+    """
+    import pytest
+
+    with pytest.raises(ValueError) as caught:
+        generation_points('<?xml version="1.0" encoding="UTF-8"?>', zone="ES")
+
+    message = str(caught.value)
+    assert "wholetext" in message
+    assert "line at a time" in message
+
+
+def test_a_truncated_document_is_reported_rather_than_returning_nothing():
+    """Silently returning no rows for a broken file loses a day without saying so."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        generation_points(document(series())[:120], zone="ES")

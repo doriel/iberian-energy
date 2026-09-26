@@ -93,9 +93,13 @@ print(f"Package imported from {os.path.dirname(iberian.__file__)}")
 from pyspark.sql import functions as F  # noqa: E402
 from pyspark.sql import types as T  # noqa: E402
 
+# `wholetext` is a parameter here and NOT `.option("wholetext", "true")`.
+# `DataFrameReader.text()` takes `wholetext=False` as its default and sets it on
+# the way through, so an option set beforehand is silently overridden and every
+# line of the file becomes a row. The parser then meets an XML declaration on
+# its own and fails somewhere that says nothing about the reader.
 documents = (
-    spark.read.option("wholetext", "true")
-    .text(SOURCE, recursiveFileLookup=True)
+    spark.read.text(SOURCE, wholetext=True, recursiveFileLookup=True)
     .select(
         F.col("value").alias("xml"),
         F.col("_metadata.file_path").alias("file_path"),
