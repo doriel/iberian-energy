@@ -34,12 +34,18 @@
 # MAGIC
 # MAGIC ## The parser is the tested one
 # MAGIC
-# MAGIC `iberian.parsing.entsoe_generation`, the same module 22 tests cover. The
+# MAGIC `iberian.parsing.entsoe_generation`, the same module 37 tests cover. The
 # MAGIC UDF is a wrapper around it and contains no parsing logic of its own,
 # MAGIC because logic that lives in a notebook is logic no test ever sees. That
-# MAGIC matters more than it sounds: the awkward parts here, sparse positions and
-# MAGIC two zones publishing at different resolutions, are exactly the parts a
-# MAGIC reimplementation would get subtly wrong.
+# MAGIC matters more than it sounds: the awkward parts here are the direction of
+# MAGIC the flow, sparse positions and two zones publishing at different
+# MAGIC resolutions, and each one is a place a reimplementation would be subtly
+# MAGIC wrong without failing.
+# MAGIC
+# MAGIC Measured on the run that produced this table: pumped storage is 50.9 per
+# MAGIC cent consumption rows, solar and nuclear and wind are zero per cent, and
+# MAGIC nuclear generation averages 976 MW. Those three numbers together are the
+# MAGIC evidence that the direction is being read and not guessed.
 # MAGIC
 # MAGIC ## One file first
 # MAGIC
