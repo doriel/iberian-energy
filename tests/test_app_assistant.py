@@ -332,3 +332,52 @@ def test_earlier_messages_are_replayed_so_a_confirmation_has_context():
 
     roles = [m["role"] for m in model.seen[0]]
     assert roles == ["system", "user", "assistant", "user"]
+
+
+# --- what the agent is allowed to promise -------------------------------------
+
+
+def test_nothing_in_the_tools_promises_a_notification():
+    """The agent told somebody it would notify them. Nothing sends anything.
+
+    An alert is a stored threshold: no email, no message, no job watching the
+    market. The model only knows that if the tool descriptions say so, and the
+    first version of them said the opposite, which is how a deployed agent came
+    to offer a capability this system does not have.
+    """
+    promises = ["notify", "notified", "will tell you", "let you know", "is told"]
+    for tool in TOOLS:
+        text = tool["function"]["description"].lower()
+        for promise in promises:
+            assert promise not in text, f"{tool['function']['name']}: {promise!r}"
+
+
+def test_the_alert_tools_say_plainly_that_nothing_is_delivered():
+    by_name = {tool["function"]["name"]: tool["function"] for tool in TOOLS}
+    assert "nothing is delivered" in by_name["create_alert"]["description"].lower()
+    assert "nothing is sent" in by_name["my_alerts"]["description"].lower()
+
+
+def test_the_system_prompt_forbids_promising_to_get_in_touch():
+    from iberian.app.assistant import SYSTEM_PROMPT
+
+    assert "Never tell somebody you will let them know" in SYSTEM_PROMPT
+
+
+def test_the_system_prompt_scopes_the_agent():
+    """A guardrail in the prompt, and honest about what that costs.
+
+    This does not save a call: the model reads the question either way. What it
+    buys is an application that stays about one thing, which is what somebody
+    reviewing it is entitled to.
+    """
+    from iberian.app.assistant import SYSTEM_PROMPT
+
+    assert "Nothing else." in SYSTEM_PROMPT
+    assert "do not answer anyway" in SYSTEM_PROMPT
+
+
+def test_the_system_prompt_asks_for_short_answers():
+    from iberian.app.assistant import SYSTEM_PROMPT
+
+    assert "every answer is paid for" in SYSTEM_PROMPT

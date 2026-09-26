@@ -118,6 +118,7 @@
   <p class="muted" style="font-size:13px;margin-bottom:0">
     The agent can look things up, save an alert, record a judgement, and delete
     an alert. Deleting asks first.
+    <span id="budget"></span>
   </p>
 </section>
 
@@ -138,6 +139,11 @@
 
 <section>
   <h2>Your alerts</h2>
+  <p class="muted" style="margin-top:0;font-size:13px">
+    A threshold you want to keep an eye on, saved and shown back to you.
+    Nothing is sent when a price crosses it: this records what matters to you,
+    it does not watch the market for you.
+  </p>
   <div class="row" style="margin-bottom:12px">
     <div>
       <label for="zone">Zone</label>
@@ -410,6 +416,20 @@ function announce(result) {
   node.scrollIntoView({ block: "nearest" });
 }
 
+// Shown only once it is worth knowing. A counter from the first question
+// reads as a meter running; one that appears near the end reads as a warning,
+// which is what it is.
+function showBudget(remaining) {
+  if (remaining === undefined || remaining === null) return;
+  const node = $("budget");
+  node.textContent =
+    remaining === 0
+      ? " No questions left in this session."
+      : remaining <= 5
+      ? ` ${remaining} question${remaining === 1 ? "" : "s"} left in this session.`
+      : "";
+}
+
 async function send() {
   const question = $("question").value.trim();
   if (!question) return;
@@ -429,6 +449,21 @@ async function send() {
   waiting.remove();
   $("send").disabled = false;
 
+  if (endedSession(payload)) {
+    location.href = "/signin";
+    return;
+  }
+
+  // A refusal over the budget is not an error and does not belong in the
+  // conversation as though the agent had said it. The agent said nothing; the
+  // application did, and the person should be able to tell which.
+  if (payload.refused) {
+    announce({ status: "rejected", message: payload.reply });
+    history.pop();
+    showBudget(payload.remaining);
+    return;
+  }
+
   if (payload.ok === false && payload.reply === undefined) {
     announce({ status: "error", message: payload.error });
     return;
@@ -436,6 +471,7 @@ async function send() {
   bubble("them", payload.reply || "(no answer)");
   history.push({ role: "assistant", content: payload.reply || "" });
   (payload.results || []).forEach(announce);
+  showBudget(payload.remaining);
 
   // A write through the conversation has to show up in the panels without a
   // manual refresh, or the person cannot tell whether it really happened.

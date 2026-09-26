@@ -391,10 +391,41 @@ def ask(
     body: Question,
     mibel_session: str | None = Cookie(default=None),
 ) -> dict:
+    """One question, if the budget allows it.
+
+    The order here is the whole point. The session is checked, then the budget,
+    and only then is anything sent to the model. A refusal on either costs
+    nothing, which is what makes the budget a cost control rather than a
+    politeness.
+    """
     from iberian.app.assistant import Assistant
+    from iberian.app.limits import BUDGET
+
+    session = _session(mibel_session)
+    if session is None:
+        return {
+            "ok": False,
+            "signed_out": True,
+            "reply": "Your session has ended. Sign in again to continue.",
+            "results": [],
+        }
+
+    session_id = session[1]
+    verdict = BUDGET.check(session_id)
+    if not verdict.allowed:
+        # Not an error, and not logged as one. The person asked a reasonable
+        # question and the answer is that this demonstration has a budget.
+        return {
+            "ok": False,
+            "refused": True,
+            "limit": verdict.limit,
+            "reply": verdict.message,
+            "remaining": BUDGET.remaining(session_id),
+            "results": [],
+        }
 
     try:
-        assistant = Assistant(actions=actions_for(_session(mibel_session)), chat=chat())
+        assistant = Assistant(actions=actions_for(session), chat=chat())
         turn = assistant.ask(
             body.question,
             history=[
@@ -403,6 +434,10 @@ def ask(
                 if message.get("role") in {"user", "assistant"}
             ],
         )
+        # Spent after the call returned, not before. A question the endpoint
+        # never answered, because it was down or the credential was wrong, is
+        # not one anybody should be charged for.
+        BUDGET.spend(session_id)
     except Exception as exc:
         # The endpoint being down, the credential being wrong, the network. The
         # person gets a sentence; the page keeps its conversation.
@@ -418,9 +453,7 @@ def ask(
         "reply": turn.reply,
         "rounds": turn.rounds,
         "wrote": turn.wrote_anything,
-        # Only the action results, not the rows a read returned: the page
-        # already has the rows from its own endpoints, and shipping them twice
-        # invites the two copies to disagree.
+        "remaining": BUDGET.remaining(session_id),
         "results": [
             _result(result) for result in turn.results if hasattr(result, "status")
         ],

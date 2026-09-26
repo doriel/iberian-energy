@@ -205,3 +205,43 @@ def test_the_diagnostic_offers_the_flow_once_it_is_configured(client, monkeypatc
     assert "/login" in response.text
     # And it must not leak the secret onto a page anybody can open.
     assert "secret" not in response.text
+
+
+# --- the budget, through the route ---------------------------------------------
+
+
+def test_the_agent_refuses_over_budget_without_calling_the_model(client, monkeypatch):
+    """The assertion that makes this a cost control rather than a politeness.
+
+    If the model is reached before the budget is checked, the refusal has
+    already been paid for and the limit is decoration.
+    """
+    import app.api as api
+    from iberian.app.limits import Budget
+
+    called = []
+    monkeypatch.setattr(api, "chat", lambda: (lambda *a, **k: called.append(1) or {}))
+    monkeypatch.setattr("iberian.app.limits.BUDGET", Budget(per_session=0))
+
+    client.post("/api/session", json={"name": "Ana"})
+    payload = client.post("/api/ask", json={"question": "hello"}).json()
+
+    assert payload["refused"] is True
+    assert payload["limit"] == "session"
+    assert called == [], "the model was called for a question that was refused"
+
+
+def test_asking_without_a_session_is_a_sign_out_not_a_refusal(client):
+    """Two different answers, and the page does different things with them."""
+    payload = client.post("/api/ask", json={"question": "hello"}).json()
+
+    assert payload["signed_out"] is True
+    assert payload.get("refused") is None
+
+
+def test_a_question_longer_than_the_cap_is_rejected_before_anything(client):
+    """Pydantic, not us, but worth a test: it is the cheapest limit there is."""
+    client.post("/api/session", json={"name": "Ana"})
+    response = client.post("/api/ask", json={"question": "x" * 5000})
+
+    assert response.status_code == 422
