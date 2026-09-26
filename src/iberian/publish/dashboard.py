@@ -308,8 +308,14 @@ def build(
             agreement[["pt_difference", "es_difference"]].max().max(), 4
         )
     if not cost.empty:
-        ours = cost["our_cost_eur"].sum()
+        # Rent against rent. This used to compare the import cost, which counts
+        # only the hours Portugal was buying, against REE's rent, which counts
+        # both directions. The two agree only while every decoupled interval
+        # runs the same way, which was true of the first seventy days and not
+        # of the year.
+        ours = cost["our_rent_eur"].sum()
         theirs = cost["congestion_rent_eur"].sum()
+        headline["our_rent_eur"] = number(ours, 0)
         headline["ree_rent_eur"] = number(theirs, 0)
         headline["cost_difference_pct"] = (
             number((ours - theirs) / theirs * 100.0, 4) if theirs else None
@@ -357,8 +363,12 @@ def summarise(payload: dict) -> list[str]:
         # ours none, and it was read the wrong way round: as this project
         # counting more than the operator, when it counts slightly less.
         lines.append(
-            f"Extra import cost {head['total_cost_eur']:,.0f} EUR vs REE "
-            f"congestion rent {head['ree_rent_eur']:,.0f} EUR "
+            f"Congestion rent {head['our_rent_eur']:,.0f} EUR vs REE "
+            f"{head['ree_rent_eur']:,.0f} EUR "
             f"({head['cost_difference_pct']}%)"
+        )
+        lines.append(
+            f"Extra import cost to Portugal {head['total_cost_eur']:,.0f} EUR, "
+            "which counts only the hours it was importing"
         )
     return lines

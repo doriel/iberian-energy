@@ -151,6 +151,16 @@ def gold_split_episodes(
     The cost is the honest part that is easy to get wrong, so it is stated as
     the premium applied to the energy actually imported during the episode,
     not to Portuguese demand, which would overstate it wildly.
+
+    Two money columns, and they answer different questions:
+
+    `extra_cost_eur` is what Portugal paid extra, importing direction only. An
+    hour Portugal exported at a premium cost Portugal nothing, so it counts
+    zero here, which is right for the question being asked.
+
+    `congestion_rent_eur` is the price difference applied to the flow in
+    whichever direction it went. That is what a system operator publishes, and
+    it is the only one of the two that can be checked against REE.
     """
     if flagged.empty:
         return pd.DataFrame()
@@ -200,6 +210,7 @@ def gold_split_episodes(
         merged = flagged.copy()
 
     costs = []
+    rents = []
     saturated_share = []
     for _, episode in episodes.iterrows():
         window = merged[
@@ -208,10 +219,29 @@ def gold_split_episodes(
             & merged["is_decoupled"]
         ]
         if "net_flow_mw" in window.columns and not window.empty:
+            # What Portugal paid extra, which is the journalist's number. Only
+            # the importing direction counts, because on an hour Portugal
+            # exported it did not pay a premium, it collected one.
             imported_mwh = window["net_flow_mw"].clip(lower=0) * step_hours
             costs.append(float((window["spread_eur_mwh"].abs() * imported_mwh).sum()))
+
+            # The congestion rent, which is a different quantity and is the one
+            # REE publishes: the price difference applied to whatever crossed
+            # the border, in whichever direction it crossed.
+            #
+            # These two were treated as the same thing for months and the
+            # agreement with REE looked near perfect, because every day in the
+            # window happened to have Portugal importing. A year of history
+            # broke that: in February 2026 the average flow was 195 MW from
+            # Portugal into Spain, 830 decoupled intervals ran that way, and
+            # the import cost read 12 per cent of REE's rent. The deviation by
+            # month tracked the count of exporting intervals almost exactly,
+            # and the five months with none of them agreed to the cent.
+            flowed_mwh = window["net_flow_mw"].abs() * step_hours
+            rents.append(float((window["spread_eur_mwh"].abs() * flowed_mwh).sum()))
         else:
             costs.append(None)
+            rents.append(None)
 
         if "is_saturated" in window.columns and not window.empty:
             saturated_share.append(float(window["is_saturated"].mean()))
@@ -220,6 +250,7 @@ def gold_split_episodes(
 
     episodes = episodes.copy()
     episodes["extra_cost_eur"] = costs
+    episodes["congestion_rent_eur"] = rents
     episodes["share_saturated"] = saturated_share
     episodes["explained_by_saturation"] = [
         None if share is None else share >= 0.5 for share in saturated_share

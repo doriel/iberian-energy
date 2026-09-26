@@ -384,6 +384,11 @@ EPISODE_SCHEMA = T.StructType(
         T.StructField("settlement_resolution", T.StringType()),
         T.StructField("market_day", T.DateType()),
         T.StructField("extra_cost_eur", T.DoubleType()),
+        # What a system operator publishes: the price difference applied to
+        # whatever crossed the border, in whichever direction. extra_cost_eur
+        # counts only the hours Portugal imported, so on an exporting episode
+        # the two differ by everything.
+        T.StructField("congestion_rent_eur", T.DoubleType()),
         T.StructField("share_saturated", T.DoubleType()),
         T.StructField("explained_by_saturation", T.BooleanType()),
     ]
@@ -754,10 +759,18 @@ COST_SCHEMA = T.StructType(
     [
         T.StructField("market_day", T.DateType()),
         T.StructField("episodes", T.IntegerType()),
-        T.StructField("our_cost_eur", T.DoubleType()),
+        # Rent against rent, which is like for like. The column this replaced
+        # held the import cost and was compared against REE's rent: those count
+        # one direction and two, so they agree only while every decoupled
+        # interval runs the same way. Seventy days of summer did; a year did
+        # not, and the check read -21 per cent until this changed.
+        T.StructField("our_rent_eur", T.DoubleType()),
         T.StructField("congestion_rent_eur", T.DoubleType()),
         T.StructField("difference_eur", T.DoubleType()),
         T.StructField("difference_pct", T.DoubleType()),
+        # Carried because it is still the number a journalist prints. It is
+        # simply not the number this table is checking.
+        T.StructField("our_import_cost_eur", T.DoubleType()),
     ]
 )
 
@@ -826,7 +839,7 @@ def gold_price_source_agreement():
 
 @dp.materialized_view(
     name="gold_cost_validation",
-    comment="This project's extra import cost against REE's published congestion rent.",
+    comment="This project's congestion rent against REE's published figure, rent against rent. The import cost is carried alongside but is a different quantity.",
     table_properties={"quality": "gold"},
 )
 def gold_cost_validation():

@@ -118,16 +118,27 @@ def test_an_empty_side_produces_an_empty_comparison_not_an_error():
 
 
 def episodes(*rows) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
+    """Episode rows for the cost check.
+
+    Each row is `(day, congestion_rent)` or `(day, congestion_rent,
+    import_cost)`. The two are separate because they are separate quantities:
+    the rent counts the flow in whichever direction it went, the import cost
+    counts only the hours Portugal was buying. Tests that do not care about the
+    difference pass one number and get both.
+    """
+    built = []
+    for row in rows:
+        day, rent_value = row[0], row[1]
+        import_cost = row[2] if len(row) > 2 else rent_value
+        built.append(
             {
                 "market_day": day,
                 "start_utc": pd.Timestamp("2026-08-18T10:00Z"),
-                "extra_cost_eur": cost,
+                "congestion_rent_eur": rent_value,
+                "extra_cost_eur": import_cost,
             }
-            for day, cost in rows
-        ]
-    )
+        )
+    return pd.DataFrame(built)
 
 
 def rent(*rows) -> pd.DataFrame:
@@ -154,7 +165,7 @@ def test_several_episodes_in_one_day_are_summed_before_comparing():
     )
 
     assert result.iloc[0]["episodes"] == 2
-    assert result.iloc[0]["our_cost_eur"] == 1_000_000.0
+    assert result.iloc[0]["our_rent_eur"] == 1_000_000.0
     assert result.iloc[0]["difference_eur"] == 0.0
 
 
@@ -167,7 +178,7 @@ def test_a_day_ree_recorded_and_this_project_missed_is_visible():
 
     missed = result[result["market_day"] == date(2026, 8, 22)].iloc[0]
     assert missed["episodes"] == 0
-    assert missed["our_cost_eur"] == 0.0
+    assert missed["our_rent_eur"] == 0.0
     assert missed["difference_eur"] == -40.0
 
 
@@ -197,3 +208,68 @@ def test_both_sides_empty_gives_an_empty_frame_with_its_columns():
     result = cost_validation(pd.DataFrame(), pd.DataFrame())
     assert result.empty
     assert "congestion_rent_eur" in result.columns
+
+
+# --- the direction bug, and why the old check could not have caught it --------
+
+
+def test_the_check_compares_rent_against_rent_not_import_cost_against_rent():
+    """The regression that a year of history exposed.
+
+    The old version compared `extra_cost_eur`, which counts only the hours
+    Portugal imported, against REE's congestion rent, which counts both
+    directions. On a day Portugal exported at a premium the import cost is
+    zero and the rent is not, so the check reported a shortfall that was a
+    definition mismatch rather than a fault.
+    """
+    exporting_day = episodes((date(2026, 2, 18), 1_000_000.0, 0.0))
+    result = cost_validation(exporting_day, rent((date(2026, 2, 18), 1_000_000.0)))
+
+    assert result.iloc[0]["difference_eur"] == 0.0, "rent against rent agrees"
+    assert result.iloc[0]["our_import_cost_eur"] == 0.0
+    assert result.iloc[0]["our_rent_eur"] == 1_000_000.0
+
+
+def test_the_import_cost_is_still_reported_because_it_is_still_the_answer():
+    """It is the number a journalist prints. It is simply not the number this
+    check is checking."""
+    result = cost_validation(
+        episodes((date(2026, 8, 18), 900_000.0, 700_000.0)),
+        rent((date(2026, 8, 18), 900_000.0)),
+    )
+    assert result.iloc[0]["our_import_cost_eur"] == 700_000.0
+    assert result.iloc[0]["difference_pct"] == 0.0
+
+
+def test_a_day_whose_rent_could_not_be_computed_is_null_rather_than_zero():
+    """A hole in the border series and a day that genuinely cost nothing are
+    different, and filling both with zero makes the first look like
+    agreement."""
+    incomplete = pd.DataFrame(
+        [
+            {
+                "market_day": date(2026, 2, 18),
+                "start_utc": pd.Timestamp("2026-02-18T10:00Z"),
+                "congestion_rent_eur": None,
+                "extra_cost_eur": None,
+            }
+        ]
+    )
+    result = cost_validation(incomplete, rent((date(2026, 2, 18), 500_000.0)))
+
+    assert result.iloc[0]["episodes"] == 1
+    assert result.iloc[0]["our_rent_eur"] is None
+    assert result.iloc[0]["difference_eur"] is None
+    assert result.iloc[0]["difference_pct"] is None
+
+
+def test_a_day_with_no_episodes_at_all_is_a_real_zero():
+    result = cost_validation(
+        pd.DataFrame(columns=["market_day", "start_utc", "congestion_rent_eur",
+                              "extra_cost_eur"]),
+        rent((date(2026, 2, 18), 500_000.0)),
+    )
+
+    assert result.iloc[0]["episodes"] == 0
+    assert result.iloc[0]["our_rent_eur"] == 0.0
+    assert result.iloc[0]["difference_eur"] == -500_000.0
