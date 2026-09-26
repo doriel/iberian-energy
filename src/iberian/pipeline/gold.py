@@ -19,9 +19,13 @@ from __future__ import annotations
 import pandas as pd
 
 from iberian.analysis.market_splitting import (
+    RESOLUTION_STEPS,
     detect_episodes,
     flag_decoupling,
     infer_step,
+    mixed_resolutions,
+    resolution_segments,
+    step_for,
 )
 from iberian.market_time import to_market_day
 
@@ -44,9 +48,25 @@ def gold_interval_premium(joined: pd.DataFrame) -> pd.DataFrame:
         "capacity_mw": "capacity_mw",
         "utilisation": "utilisation",
         "is_saturated": "is_saturated",
+        "resolution": "settlement_resolution",
     }
     present = {src: dst for src, dst in columns.items() if src in joined.columns}
     out = joined[list(present)].rename(columns=present).copy()
+
+    # How long this row covers. Without it, anything that averages or counts
+    # these rows weights a quarter hour the same as an hour, and this table now
+    # holds both: Iberia changed settlement resolution partway through the
+    # history. Null for a code nobody has taught this module about, which is
+    # visible, rather than a guess, which is not.
+    if "settlement_resolution" in out.columns:
+        out["interval_hours"] = [
+            RESOLUTION_STEPS[str(value).strip()] / pd.Timedelta(hours=1)
+            if value is not None
+            and not (isinstance(value, float) and value != value)
+            and str(value).strip() in RESOLUTION_STEPS
+            else None
+            for value in out["settlement_resolution"]
+        ]
 
     if "ts_utc" in out.columns:
         from iberian.market_time import to_market_day
@@ -74,9 +94,35 @@ def gold_daily_profile(intervals: pd.DataFrame) -> pd.DataFrame:
         worst_premium_eur_mwh=("premium_eur_mwh", lambda s: s.abs().max()),
     ).reset_index()
 
-    profile["split_probability"] = (
-        profile["decoupled_intervals"] / profile["intervals"]
-    )
+    # Counting intervals was right while every interval was the same length.
+    # It stopped being right the day the history spanned both hourly and
+    # quarter hourly settlement: an hour of the quarter hourly period
+    # contributes four rows and an hour of the hourly period one, so a plain
+    # count weights the recent period four times as heavily and the answer a
+    # manufacturer acts on drifts towards whichever period has more rows.
+    #
+    # Weighting by real time is the same number whenever both halves are on
+    # one grid, and the defensible one when they are not.
+    if "interval_hours" in intervals.columns:
+        timed = intervals.copy()
+        timed["_hours"] = pd.to_numeric(timed["interval_hours"], errors="coerce")
+        timed["_decoupled_hours"] = timed["_hours"] * timed["is_decoupled"].astype(float)
+        totals = (
+            timed.groupby("hour_of_day_utc")[["_hours", "_decoupled_hours"]]
+            .sum(min_count=1)
+            .rename(columns={"_hours": "hours", "_decoupled_hours": "decoupled_hours"})
+            .reset_index()
+        )
+        profile = profile.merge(totals, on="hour_of_day_utc", how="left")
+
+    if "hours" in profile.columns and profile["hours"].fillna(0).gt(0).all():
+        profile["split_probability"] = (
+            profile["decoupled_hours"] / profile["hours"]
+        )
+    else:
+        profile["split_probability"] = (
+            profile["decoupled_intervals"] / profile["intervals"]
+        )
 
     if "utilisation" in intervals.columns:
         profile = profile.merge(
@@ -108,6 +154,29 @@ def gold_split_episodes(
     """
     if flagged.empty:
         return pd.DataFrame()
+
+    # Same reason as in `detect_episodes`, and it matters more here: `step`
+    # also scales the cost. An hourly interval costed at a quarter of an hour
+    # understates the money by a factor of four, and the cost figure is the
+    # one this project has validated to 0.0015% against REE's published
+    # congestion rent. Getting it silently wrong would cost that claim.
+    if step is None and mixed_resolutions(flagged):
+        pieces = []
+        for resolution, segment in resolution_segments(flagged):
+            found = gold_split_episodes(
+                segment, border=border, step=step_for(resolution)
+            )
+            if not found.empty:
+                pieces.append(found)
+        if not pieces:
+            return pd.DataFrame()
+        out = (
+            pd.concat(pieces, ignore_index=True)
+            .sort_values("start_utc")
+            .reset_index(drop=True)
+        )
+        out["episode_id"] = range(1, len(out) + 1)
+        return out
 
     step = step or infer_step(flagged)
     episodes = detect_episodes(flagged, step=step)

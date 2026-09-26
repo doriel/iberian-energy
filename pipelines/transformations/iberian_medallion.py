@@ -335,6 +335,13 @@ INTERVAL_SCHEMA = T.StructType(
         T.StructField("capacity_mw", T.DoubleType()),
         T.StructField("utilisation", T.DoubleType()),
         T.StructField("is_saturated", T.BooleanType()),
+        # Iberia moved the day-ahead auction from hourly to quarter hourly
+        # settlement partway through the history this table now holds, so a
+        # reader cannot assume every row covers the same span. These two say
+        # which grid the row is on and how long it lasts, and anything that
+        # averages or counts these rows has to weight by the second one.
+        T.StructField("settlement_resolution", T.StringType()),
+        T.StructField("interval_hours", T.DoubleType()),
         T.StructField("market_day", T.DateType()),
         T.StructField("hour_of_day_utc", T.IntegerType()),
     ]
@@ -347,6 +354,12 @@ PROFILE_SCHEMA = T.StructType(
         T.StructField("decoupled_intervals", T.LongType()),
         T.StructField("mean_premium_eur_mwh", T.DoubleType()),
         T.StructField("worst_premium_eur_mwh", T.DoubleType()),
+        # The denominator behind split_probability, which is now real time
+        # rather than a row count. Counting rows weighted an hour of the
+        # quarter hourly period four times as heavily as an hour of the hourly
+        # one, and this is the table a manufacturer acts on every week.
+        T.StructField("hours", T.DoubleType()),
+        T.StructField("decoupled_hours", T.DoubleType()),
         T.StructField("split_probability", T.DoubleType()),
         T.StructField("mean_utilisation", T.DoubleType()),
         T.StructField("mean_capacity_mw", T.DoubleType()),
@@ -365,6 +378,10 @@ EPISODE_SCHEMA = T.StructType(
         T.StructField("peak_spread", T.DoubleType()),
         T.StructField("premium_side", T.StringType()),
         T.StructField("max_severity", T.StringType()),
+        # Which settlement grid this episode was measured on. An episode that
+        # straddled the change comes out as two, which is the honest answer:
+        # the basis under it changed.
+        T.StructField("settlement_resolution", T.StringType()),
         T.StructField("market_day", T.DateType()),
         T.StructField("extra_cost_eur", T.DoubleType()),
         T.StructField("share_saturated", T.DoubleType()),
@@ -449,7 +466,12 @@ def _one_table(name: str, schema: T.StructType):
         frame = _rebuild(events).get(name, pd.DataFrame())
         if frame.empty:
             return pd.DataFrame(columns=schema.fieldNames())
-        return frame[schema.fieldNames()]
+        # `reindex` rather than `frame[...]`. A column the builder did not
+        # produce arrives as null and is visible in the table; a KeyError here
+        # takes the whole pipeline down at four in the afternoon over a column
+        # that is optional by construction, such as the settlement resolution
+        # when a caller built the spread from rows that never carried one.
+        return frame.reindex(columns=schema.fieldNames())
 
     return build
 
