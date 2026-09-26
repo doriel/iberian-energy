@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import requests
 
 from iberian.config import (
+    DOC_ACTUAL_GENERATION_PER_UNIT,
     DOC_DAY_AHEAD_PRICES,
     DOC_FORECASTED_CAPACITY,
     DOC_GENERATION_UNAVAILABILITY,
@@ -29,6 +30,7 @@ from iberian.config import (
     DOC_SCHEDULED_EXCHANGES,
     DOC_TRANSMISSION_UNAVAILABILITY,
     ENTSOE_BASE_URL,
+    PROCESS_TYPE_REALISED,
 )
 
 ENTSOE_TIME_FORMAT = "%Y%m%d%H%M"
@@ -338,3 +340,31 @@ class EntsoeClient:
         if published_end:
             params["periodEndUpdate"] = self._fmt(published_end)
         return self._get(params)
+
+    def actual_generation_per_unit(
+        self, eic_code: str, day_start: datetime, day_end: datetime
+    ) -> RawResponse:
+        """What every generation unit in a control area actually produced.
+
+        [16.1.A]. One request returns every unit that reported, so the unit list
+        is discovered from the data rather than maintained by hand, which is the
+        only way it stays correct as plants are commissioned and retired.
+
+        **One day per request, and that is the API's limit rather than a choice
+        here.** A wider window is refused, so the caller loops over days. Worth
+        stating plainly because every other method on this client takes an
+        arbitrary range and somebody will reasonably expect this one to as well.
+
+        `psrType` is deliberately not passed. Filtering to one production type
+        per request would multiply the request count by twenty for data the
+        response already carries per unit.
+        """
+        return self._get(
+            {
+                "documentType": DOC_ACTUAL_GENERATION_PER_UNIT,
+                "processType": PROCESS_TYPE_REALISED,
+                "in_Domain": eic_code,
+                "periodStart": self._fmt(day_start),
+                "periodEnd": self._fmt(day_end),
+            }
+        )

@@ -34,6 +34,13 @@ DOC_GENERATION_UNAVAILABILITY = "A80"
 DOC_TRANSMISSION_UNAVAILABILITY = "A78"
 DOC_PRODUCTION_UNAVAILABILITY = "A77"  # [15.1.A-D], keyed on biddingZone_Domain
 
+# Actual generation per generation unit [16.1.A]. Verified against the API
+# documentation rather than assumed: documentType A73 with processType A16, and
+# a hard limit of ONE DAY per request. That limit is what shapes the ingestion,
+# so it is written next to the constant rather than buried in a function.
+DOC_ACTUAL_GENERATION_PER_UNIT = "A73"
+PROCESS_TYPE_REALISED = "A16"
+
 # businessType narrows an unavailability query. Omitting it returns both.
 BUSINESS_TRANSMISSION_UNPLANNED = "B12"
 BUSINESS_TRANSMISSION_PLANNED = "B13"
