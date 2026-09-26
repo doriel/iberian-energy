@@ -26,9 +26,17 @@ def payload(days: int, generated: str) -> bytes:
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, body: dict | None = None) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        body: dict | None = None,
+        content: bytes | None = None,
+        headers: dict | None = None,
+    ) -> None:
         self.status_code = status_code
         self._body = body or {}
+        self.content = content or b""
+        self.headers = headers or {}
 
     def json(self) -> dict:
         return self._body
@@ -151,3 +159,105 @@ def test_the_branch_is_passed_through(fake):
         branch="publish",
     )
     assert client.puts[0]["branch"] == "publish"
+
+
+# --- files the contents API will not inline ------------------------------------
+#
+# The dashboard payload crossed a megabyte the day it went from seventy market
+# days to a year, and the publish task failed on the first run after the
+# backfill with "did not come back base64 encoded". Above that size GitHub
+# answers the contents call with the metadata only, and the bytes have to be
+# fetched from the blobs API.
+
+
+class FakeLargeGitHub:
+    """A contents API that withholds the content, as GitHub does over 1 MB."""
+
+    def __init__(self, existing: bytes, raw: bool = True) -> None:
+        self.existing = existing
+        self.raw = raw
+        self.puts: list[dict] = []
+        self.blob_calls: list[str] = []
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        if "/git/blobs/" in url:
+            self.blob_calls.append(url.rsplit("/", 1)[-1])
+            if self.raw:
+                assert headers["Accept"] == "application/vnd.github.raw"
+                return FakeResponse(200, content=self.existing,
+                                    headers={"Content-Type": "application/octet-stream"})
+            return FakeResponse(
+                200,
+                {"encoding": "base64",
+                 "content": base64.b64encode(self.existing).decode("ascii")},
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
+        return FakeResponse(
+            200,
+            {"sha": "bigsha", "type": "file", "size": 1_838_000,
+             "encoding": "none", "content": ""},
+        )
+
+    def put(self, url, headers=None, json=None, timeout=None):
+        self.puts.append(json)
+        return FakeResponse(
+            200,
+            {"content": {"sha": "newsha"},
+             "commit": {"html_url": "https://github.test/commit/newsha"}},
+        )
+
+
+def test_a_file_over_a_megabyte_is_read_from_the_blobs_api(monkeypatch):
+    fake = FakeLargeGitHub(payload(70, "yesterday"))
+    monkeypatch.setattr(github, "requests", fake)
+
+    result = github.publish(
+        repo="doriel/iberian-energy", path="app/public/data.json",
+        content=payload(366, "today"), message="Publish", token="t",
+    )
+
+    assert fake.blob_calls == ["bigsha"], "the sha comes from the contents call"
+    assert result.status == "updated"
+    assert fake.puts[0]["sha"] == "bigsha", "the write still carries the old sha"
+
+
+def test_the_skip_decision_still_works_for_a_large_file(monkeypatch):
+    """Otherwise the daily Job commits an identical 1.8 MB file every day, and
+    a year of that is half a gigabyte of history for nothing."""
+    same = payload(366, "yesterday")
+    fake = FakeLargeGitHub(same)
+    monkeypatch.setattr(github, "requests", fake)
+
+    result = github.publish(
+        repo="doriel/iberian-energy", path="app/public/data.json",
+        content=payload(366, "today"), message="Publish", token="t",
+    )
+
+    assert result.status == "unchanged"
+    assert fake.puts == []
+
+
+def test_a_blob_served_as_json_is_handled_too(monkeypatch):
+    """The raw media type is the documented path, but an Accept header is the
+    kind of thing a proxy rewrites, and failing on that would be a mystery."""
+    fake = FakeLargeGitHub(payload(70, "yesterday"), raw=False)
+    monkeypatch.setattr(github, "requests", fake)
+
+    result = github.publish(
+        repo="doriel/iberian-energy", path="app/public/data.json",
+        content=payload(366, "today"), message="Publish", token="t",
+    )
+    assert result.status == "updated"
+
+
+def test_something_that_is_not_a_file_still_fails_loudly(monkeypatch):
+    class FakeDirectory:
+        def get(self, url, headers=None, params=None, timeout=None):
+            return FakeResponse(200, {"type": "dir", "encoding": None})
+
+    monkeypatch.setattr(github, "requests", FakeDirectory())
+
+    with pytest.raises(RuntimeError) as caught:
+        github.fetch("doriel/iberian-energy", "app/public", "main", "t")
+
+    assert "not a file" in str(caught.value)

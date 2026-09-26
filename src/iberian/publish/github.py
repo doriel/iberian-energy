@@ -57,6 +57,38 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
+#: Above this the contents API stops inlining the file and answers with the
+#: metadata alone. Documented by GitHub as one megabyte; kept here as a number
+#: so the comment below has something to point at.
+INLINE_LIMIT_BYTES = 1_000_000
+
+
+def read_blob(repo: str, sha: str, token: str) -> bytes:
+    """The bytes of one blob, for files the contents API will not inline.
+
+    The raw media type is the documented way and returns the bytes directly. If
+    something between here and GitHub rewrites the Accept header, the API
+    answers with the JSON form instead, which is still usable, so both shapes
+    are handled rather than trusting a header to survive the network.
+    """
+    response = requests.get(
+        f"{API}/repos/{repo}/git/blobs/{sha}",
+        headers={**_headers(token), "Accept": "application/vnd.github.raw"},
+        timeout=TIMEOUT,
+    )
+    response.raise_for_status()
+
+    if response.headers.get("Content-Type", "").startswith("application/json"):
+        body = response.json()
+        if body.get("encoding") == "base64":
+            return base64.b64decode(body["content"])
+        raise RuntimeError(
+            f"blob {sha[:8]} came back as JSON with encoding "
+            f"{body.get('encoding')!r} rather than raw bytes"
+        )
+    return response.content
+
+
 def fetch(repo: str, path: str, branch: str, token: str) -> tuple[str | None, bytes]:
     """The file's current sha and bytes, or (None, b"") if it is not there yet."""
     response = requests.get(
@@ -69,14 +101,25 @@ def fetch(repo: str, path: str, branch: str, token: str) -> tuple[str | None, by
         return None, b""
     response.raise_for_status()
     body = response.json()
-    if body.get("encoding") != "base64":
-        # Files over 1 MB come back without content and need the blobs API. The
-        # payload is well under that, so this is a signal that something else
-        # is at this path rather than a case worth handling.
-        raise RuntimeError(
-            f"{path} did not come back base64 encoded; it may be too large or a directory"
-        )
-    return body["sha"], base64.b64decode(body["content"])
+
+    if body.get("encoding") == "base64":
+        return body["sha"], base64.b64decode(body["content"])
+
+    if body.get("type") == "file" and body.get("sha"):
+        # Over a megabyte the contents API returns the metadata with an empty
+        # content field and encoding "none". The sha is still there, and the
+        # blobs API serves the bytes.
+        #
+        # This stopped being hypothetical the day the dashboard payload went
+        # from seventy market days to a year and crossed 1.8 MB. The previous
+        # version raised here, calling the case "not worth handling", and the
+        # publish task failed on the first run after the backfill.
+        return body["sha"], read_blob(repo, body["sha"], token)
+
+    raise RuntimeError(
+        f"{path} is not a file this can publish to: type={body.get('type')!r}, "
+        f"encoding={body.get('encoding')!r}"
+    )
 
 
 def same_data(left: bytes, right: bytes, volatile: tuple[str, ...] = VOLATILE) -> bool:
