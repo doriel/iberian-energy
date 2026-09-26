@@ -32,6 +32,21 @@
 # MAGIC one of them shows a plant producing through an afternoon it published
 # MAGIC nothing for.
 # MAGIC
+# MAGIC ## How much of this table is a held value rather than a fresh reading
+# MAGIC
+# MAGIC Measured rather than assumed. Portuguese generation blocks have a median
+# MAGIC of 60 minutes but a 95th percentile of 900, and 249,193 blocks cover
+# MAGIC roughly 637,000 hours, so the average Portuguese hour carries a value
+# MAGIC published about two and a half hours earlier. Spain is denser: a median
+# MAGIC of 15 minutes and a 95th percentile of 60.
+# MAGIC
+# MAGIC That is not an error. With A03 the publisher is asserting the value held.
+# MAGIC But "REN says it still held" and "it was measured at 19:00" are different
+# MAGIC claims, and an outage attribution built on a figure last published at
+# MAGIC dawn is weaker evidence than one built on a reading taken in the hour.
+# MAGIC So `published_at_utc` and `source_block_minutes` travel with every row,
+# MAGIC and the agent can tell which kind of number it is holding.
+# MAGIC
 # MAGIC ## Hourly means are time weighted
 # MAGIC
 # MAGIC Spain publishes quarter hourly and Portugal hourly, and an A03 block can
@@ -148,6 +163,10 @@ blocks = (
         "block_end_utc",
         F.least(F.coalesce(F.col("next_ts_utc"), F.col("period_bound")), F.col("period_bound")),
     )
+    .withColumn(
+        "block_minutes",
+        (F.unix_timestamp("block_end_utc") - F.unix_timestamp("ts_utc")) / 60.0,
+    )
     .filter(F.col("block_end_utc") > F.col("ts_utc"))
 )
 
@@ -155,17 +174,15 @@ print(f"{blocks.count():,} blocks with a positive length")
 
 print("\nblock lengths in minutes, which say how sparse the A03 curve really is:")
 (
-    blocks.withColumn(
-        "minutes",
-        (F.unix_timestamp("block_end_utc") - F.unix_timestamp("ts_utc")) / 60,
-    )
-    .groupBy("zone")
+    blocks.groupBy("zone", "flow_direction")
     .agg(
-        F.round(F.min("minutes"), 1).alias("shortest"),
-        F.round(F.expr("percentile_approx(minutes, 0.5)"), 1).alias("median"),
-        F.round(F.expr("percentile_approx(minutes, 0.99)"), 1).alias("p99"),
-        F.round(F.max("minutes"), 1).alias("longest"),
+        F.count("*").alias("blocks"),
+        F.round(F.expr("percentile_approx(block_minutes, 0.5)"), 1).alias("median"),
+        F.round(F.expr("percentile_approx(block_minutes, 0.95)"), 1).alias("p95"),
+        F.round(F.expr("percentile_approx(block_minutes, 0.99)"), 1).alias("p99"),
+        F.sum((F.col("block_minutes") > 180).cast("int")).alias("over_3h"),
     )
+    .orderBy("zone", "flow_direction")
     .show(truncate=False)
 )
 
@@ -221,6 +238,8 @@ hourly = (
             "consumption_mw_minutes"
         ),
         F.sum(F.when(consuming, F.col("minutes"))).alias("consumption_minutes"),
+        F.min(F.when(generating, F.col("ts_utc"))).alias("published_at_utc"),
+        F.max(F.when(generating, F.col("block_minutes"))).alias("source_block_minutes"),
     )
     .withColumn(
         "output_mw",
@@ -232,6 +251,7 @@ hourly = (
     )
     .withColumn("output_minutes", F.round(F.col("output_minutes"), 2))
     .withColumn("consumption_minutes", F.round(F.col("consumption_minutes"), 2))
+    .withColumn("source_block_minutes", F.round(F.col("source_block_minutes"), 1))
     .drop("generation_mw_minutes", "consumption_mw_minutes")
 )
 
@@ -355,6 +375,8 @@ assessed = (
         "output_minutes",
         "consumption_mw",
         "consumption_minutes",
+        "published_at_utc",
+        "source_block_minutes",
         F.col("assessment.baseline_mw").alias("baseline_mw"),
         F.col("assessment.baseline_observations").alias("baseline_observations"),
         F.col("baseline_span_days"),
@@ -410,6 +432,18 @@ COMMENTS = {
                       "separate positive series. Deliberately a second column and "
                       "never netted off: they are different quantities.",
     "consumption_minutes": "Coverage for consumption_mw.",
+    "published_at_utc": "When the generation reading behind output_mw was published. "
+                        "With curveType A03 a value holds until the next position, so "
+                        "this can be hours before hour_utc. Equal to hour_utc means a "
+                        "reading taken in this hour; earlier means a value the "
+                        "publisher asserts still held.",
+    "source_block_minutes": "How long the longest block behind this hour runs. 15 or "
+                            "60 is a fresh reading. 1440 is one point published for a "
+                            "whole day. Provenance, not quality: a long block is the "
+                            "publisher saying nothing changed. But an outage claim "
+                            "built on a value held since dawn is weaker evidence than "
+                            "one built on a reading taken in the hour, and the agent "
+                            "should be able to tell the difference.",
     "baseline_mw": "Median output of this unit at this local hour over the previous "
                    "30 observations, excluding this one. A median rather than a "
                    "mean because the thing being detected is a unit behaving "
@@ -497,6 +531,22 @@ print("how many rows have a baseline behind them:")
     .show(truncate=False)
 )
 
+print("how fresh the figure behind each hour is:")
+(
+    gold.filter(F.col("output_mw").isNotNull())
+    .withColumn(
+        "freshness",
+        F.when(F.col("source_block_minutes") <= 60, "published in this hour")
+        .when(F.col("source_block_minutes") <= 180, "held up to 3 hours")
+        .when(F.col("source_block_minutes") < 1440, "held 3 to 24 hours")
+        .otherwise("one point for the whole day"),
+    )
+    .groupBy("zone", "freshness")
+    .count()
+    .orderBy("zone", F.desc("count"))
+    .show(truncate=False)
+)
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -526,6 +576,21 @@ print("\nby production type:")
     )
     .orderBy(F.desc("hours"))
     .show(10, truncate=False)
+)
+
+print("offline hours by how fresh the zero is, which is what the agent needs:")
+(
+    gold.filter(F.col("looks_offline"))
+    .withColumn(
+        "freshness",
+        F.when(F.col("source_block_minutes") <= 60, "published in this hour")
+        .when(F.col("source_block_minutes") < 1440, "held from earlier")
+        .otherwise("one point for the whole day"),
+    )
+    .groupBy("zone", "freshness")
+    .count()
+    .orderBy("zone", F.desc("count"))
+    .show(truncate=False)
 )
 
 print("the largest shortfalls, as a sample somebody can go and check:")
