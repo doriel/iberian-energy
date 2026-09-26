@@ -58,8 +58,19 @@ jobs:
       # The web service installs a different, much shorter file. Resolving it
       # here catches the case where the app gains an import that was only ever
       # installed as a side effect of the development requirements.
+      #
+      # Importing app.main is not enough on its own. It loads the workbench
+      # routes inside a try, deliberately, so that a deployment missing its
+      # database configuration still serves the dashboard a visitor lands on.
+      # That same try would swallow a missing dependency and print it, and this
+      # check would pass while /workbench returned 404 in production. So the
+      # flag is asserted rather than the import.
       - name: Check the app's dependencies resolve on their own
         run: |
           python -m venv /tmp/appenv
           /tmp/appenv/bin/pip install --quiet -r requirements-app.txt
-          /tmp/appenv/bin/python -c "import app.main; print('app imports cleanly')"
+          /tmp/appenv/bin/python -c "
+          import app.main
+          assert app.main.WORKBENCH, 'the workbench routes did not load, see the message above'
+          print('app imports cleanly, workbench included')
+          "
