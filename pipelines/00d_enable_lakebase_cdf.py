@@ -56,7 +56,7 @@ dbutils.widgets.removeAll()
 
 dbutils.widgets.text("project", "", "Lakebase project")
 dbutils.widgets.text("branch", "production", "Branch")
-dbutils.widgets.text("database", "databricks_postgres", "Postgres database")
+dbutils.widgets.text("database", "databricks-postgres", "Postgres database")
 dbutils.widgets.text("postgres_schema", "iberian", "Postgres schema to capture")
 dbutils.widgets.text("catalog", "bootcamp_students", "Destination catalog")
 dbutils.widgets.text("schema", "doriel", "Destination schema")
@@ -87,6 +87,16 @@ if not PROJECT:
 
 BRANCH_PARENT = f"projects/{PROJECT}/branches/{BRANCH}"
 DATABASE_PARENT = f"{BRANCH_PARENT}/databases/{DATABASE}"
+
+# The database goes by two names and they differ by one character.
+#
+#   `databricks-postgres`  the RESOURCE id, hyphenated, what this parent needs
+#   `databricks_postgres`  the POSTGRES database name, what psycopg connects to
+#
+# Same database. Resource ids in this API are lowercase letters, digits and
+# hyphens, which is the same rule that made `role_id` differ from the Postgres
+# role name earlier in this project. Putting the underscore form here yields a
+# not-found that names the whole path and does not say which segment is wrong.
 
 print(f"source      {DATABASE_PARENT}, schema {POSTGRES_SCHEMA}")
 print(f"destination {CATALOG}.{SCHEMA}")
