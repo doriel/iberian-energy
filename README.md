@@ -289,7 +289,8 @@ is only answerable on a day when the zones actually priced apart.
 multiplied by the energy that crossed the border while the zones priced apart,
 computed from ENTSO-E prices and schedules. REE publishes the congestion rent on
 the same border as ESIOS indicator 599, and `gold_cost_validation` compares them
-per market day. Over 366 market days the two agree to **-0.0042%**.
+per market day. Over 367 market days this project totals 27,720,655 EUR against
+REE's 27,721,890 EUR, a difference of **-0.0045%**.
 
 The comparison is rent against rent, and that took a correction. An earlier
 version compared REE's rent to `extra_cost_eur`, which counts the import

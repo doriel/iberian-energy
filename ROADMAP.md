@@ -97,7 +97,7 @@ never share values.
 | Attribution to named transmission assets | **done**, with the unexplained remainder reported explicitly |
 | Point in time correctness | **done and measured**. 0 future notices retrieved with the filter, 1,151 without it across 277 of 377 episodes. See below |
 | Cross source price validation | **done**, as a gold table, not a script |
-| Cost figure validated against the system operator | **done**, as a gold table, rent against rent, over 366 days |
+| Cost figure validated against the system operator | **done**, as a gold table, rent against rent, over 367 days |
 | A generation unit against its own baseline | **done**, `gold_unit_hourly_output`, 30 day median of the same local hour |
 | Weather effect, controlled for time of day | **done**, and the naive version was wrong |
 | Demand forecast error | **partial**, the series are in silver, the analysis is not written |
@@ -138,7 +138,8 @@ two days out of the year, not the prices themselves.
 
 ### Cost, against REE, and the correction that got there
 
-**Over 366 market days the two figures agree to -0.0042%.**
+**Over 367 market days the two figures agree to -0.0045%: 27,720,655 EUR
+against REE's 27,721,890 EUR.**
 
 REE publishes the congestion rent on the Spain to Portugal border as ESIOS
 indicator 599. `gold_split_episodes.congestion_rent_eur` is this project's
