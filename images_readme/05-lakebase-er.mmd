@@ -1,0 +1,58 @@
+---
+title: The Lakebase schema, iberian
+---
+erDiagram
+  episodes ||--o{ episode_labels : "labelled by, ON DELETE CASCADE"
+
+  episodes {
+    text        episode_key         PK "market_day + start, content derived"
+    date        market_day          "indexed DESC"
+    timestamptz start_utc
+    timestamptz end_utc             "CHECK end_utc > start_utc"
+    text        premium_side        "CHECK in (PT, ES)"
+    numeric     peak_abs_spread     "CHECK >= 0"
+    text        severity            "CHECK in (minor, moderate, severe)"
+    numeric     extra_cost_eur      "import direction only"
+    numeric     min_capacity_mw
+    numeric     capacity_percentile "CHECK 0..100"
+    numeric     share_saturated     "CHECK 0..1"
+    timestamptz updated_at
+  }
+
+  alerts {
+    bigserial   id                PK
+    text        created_by        "CHECK not blank"
+    text        zone              "CHECK in (PT, ES)"
+    text        direction         "CHECK in (above, below)"
+    numeric     threshold_eur_mwh "CHECK 0 < x <= 3000, the price cap"
+    boolean     active            "partial index WHERE active"
+    timestamptz created_at
+    timestamptz updated_at        "trigger, not the application"
+    UNIQUE      by_zone_direction_threshold "a retry updates, never duplicates"
+  }
+
+  episode_labels {
+    bigserial   id          PK
+    text        episode_key FK "REFERENCES episodes ON DELETE CASCADE"
+    text        created_by  "CHECK not blank"
+    text        true_cause  "CHECK, fixed vocabulary of seven"
+    text        confidence  "CHECK in (high, medium, low)"
+    text        notes
+    timestamptz created_at
+    timestamptz updated_at  "trigger"
+    UNIQUE      by_episode_and_author "two people may disagree, both rows survive"
+  }
+
+  agent_actions {
+    bigserial   id           PK
+    text        session_id
+    text        created_by
+    text        tool
+    jsonb       arguments
+    text        status       "CHECK in (ok, rejected, error), kept apart"
+    text        detail       "why, in words rather than a stack trace"
+    text        target_table
+    bigint      target_id
+    integer     latency_ms   "CHECK >= 0"
+    timestamptz created_at   "append only, no updated_at"
+  }

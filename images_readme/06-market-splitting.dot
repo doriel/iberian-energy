@@ -1,0 +1,100 @@
+/*
+ * What market splitting is, and how this platform decides it happened.
+ *
+ * The numbers in the two panels are illustrative, chosen to be readable. The
+ * thresholds underneath are not: they are the constants the code actually uses,
+ * from src/iberian/config.py and src/iberian/analysis/interconnection.py.
+ *
+ * Edit it free and without an account at https://edotor.net or
+ * https://dreampuf.github.io/GraphvizOnline.
+ *
+ * Render:  dot -Tpng -Gdpi=140 06-market-splitting.dot -o 06-market-splitting.png
+ */
+
+digraph splitting {
+  rankdir=LR;
+  bgcolor="white";
+  fontname="Helvetica";
+  labelloc="t";
+  fontsize=22;
+  ranksep=1.1;
+  nodesep=0.5;
+  label=<<B>Market splitting on the Iberian border</B><BR/><FONT POINT-SIZE="13">Portugal and Spain clear one auction, until the interconnection cannot carry any more</FONT><BR/> >;
+
+  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=12 penwidth=1.4];
+  edge [fontname="Helvetica" fontsize=10 color="#52525b"];
+
+  /* ------------------------------------------------------------ the rules */
+
+  subgraph cluster_rules {
+    label=<<B>How the code decides, and where each rule lives</B>>;
+    fontsize=15; fontcolor="#3b6ea5";
+    style="rounded,filled"; fillcolor="#f7fafd"; color="#c3d4e6"; margin=18;
+
+    r_detect [shape=plaintext style="" label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" BGCOLOR="white">
+        <TR><TD BGCOLOR="#3b6ea5" COLSPAN="2"><FONT COLOR="white"><B>Detection · market_splitting.py</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>decoupled</B></TD><TD ALIGN="LEFT">abs(price_PT - price_ES) &gt; <B>0.01</B> EUR/MWh<BR ALIGN="LEFT"/><FONT POINT-SIZE="9">Under coupling the two prices are identical to the cent,<BR ALIGN="LEFT"/>so anything above a rounding epsilon is real.</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>premium</B></TD><TD ALIGN="LEFT">price_PT - price_ES, signed<BR ALIGN="LEFT"/><FONT POINT-SIZE="9">premium_side is whichever zone pays. Usually PT. Not always.</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>severity</B></TD><TD ALIGN="LEFT">minor 0.01 to 5 · moderate 5 to 20 · <B>severe above 20</B></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>episode</B></TD><TD ALIGN="LEFT">contiguous decoupled intervals, grouped<BR ALIGN="LEFT"/><FONT POINT-SIZE="9">so the platform says "a 7 hour split on the evening of the 12th"<BR ALIGN="LEFT"/>rather than 7 unrelated rows. Grouped per settlement<BR ALIGN="LEFT"/>resolution segment, because MIBEL moved from PT60M to<BR ALIGN="LEFT"/>PT15M on 1 October 2025 and a mixed run would fragment<BR ALIGN="LEFT"/>every hourly episode.</FONT></TD></TR>
+      </TABLE>>];
+
+    r_cause [shape=plaintext style="" label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" BGCOLOR="white">
+        <TR><TD BGCOLOR="#3b6ea5" COLSPAN="2"><FONT COLOR="white"><B>The candidate cause · interconnection.py</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>utilisation</B></TD><TD ALIGN="LEFT">scheduled net flow / available capacity, in that direction</TD></TR>
+        <TR><TD ALIGN="LEFT"><B>is_saturated</B></TD><TD ALIGN="LEFT">utilisation &gt;= <B>0.98</B></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>share_saturated</B></TD><TD ALIGN="LEFT">fraction of an episode's intervals that were saturated</TD></TR>
+        <TR><TD BGCOLOR="#f7fafd" ALIGN="LEFT" COLSPAN="2"><FONT POINT-SIZE="9"><B>Saturation is the candidate, not the verdict.</B> A saturated border says the<BR ALIGN="LEFT"/>zones could not equalise; it does not say why the capacity was low. That<BR ALIGN="LEFT"/>answer comes from an A78 outage notice published before the episode<BR ALIGN="LEFT"/>began, and the agent has to name it or say the published facts do not<BR ALIGN="LEFT"/>explain the move.</FONT></TD></TR>
+      </TABLE>>];
+
+    r_who [shape=plaintext style="" label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" BGCOLOR="white">
+        <TR><TD BGCOLOR="#2f8a54"><FONT COLOR="white"><B>Why anyone cares</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>The manufacturer</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="10">which hours carry the premium, so the<BR ALIGN="LEFT"/>energy intensive run goes somewhere else</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>The journalist or regulator watcher</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="10">a defensible cost for one episode, with a<BR ALIGN="LEFT"/>cause that points at a published document</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>The grid analyst</B><BR ALIGN="LEFT"/><FONT POINT-SIZE="10">how often the border binds, and which unit<BR ALIGN="LEFT"/>was off its own baseline when it did</FONT></TD></TR>
+        <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT"><FONT POINT-SIZE="9">Almost nobody tracks this. The two prices are<BR ALIGN="LEFT"/>published, the gap is not.</FONT></TD></TR>
+      </TABLE>>];
+
+    r_detect -> r_cause [style=invis];
+    r_cause -> r_who [style=invis];
+  }
+  /* ------------------------------------------------------------ the split */
+
+  subgraph cluster_split {
+    label=<<B>Split · what the platform exists to catch</B><BR/><FONT POINT-SIZE="10">the border binds, the zones decouple, Portugal pays</FONT>>;
+    fontsize=15; fontcolor="#b5761f";
+    style="rounded,filled"; fillcolor="#fffcf7"; color="#e6d3b8"; margin=18;
+
+    s_es [label=<<B>Spain</B><BR/>48.10 EUR/MWh<BR/><FONT POINT-SIZE="10">cheap power it cannot export</FONT>>
+          fillcolor="#fdf3e7" color="#b5761f"];
+    s_pt [label=<<B>Portugal</B><BR/>79.60 EUR/MWh<BR/><FONT POINT-SIZE="10">clears on its own stack:<BR/>gas sets the price</FONT>>
+          fillcolor="#fdf3e7" color="#b5761f"];
+    s_note [shape=note style="filled" fillcolor="#ffffff" color="#e6d3b8" fontsize=10
+            label=<<B>premium = +31.50 EUR/MWh, premium_side = PT, severity = severe</B><BR ALIGN="LEFT"/>Every MWh Portugal consumes in this interval costs 31.50 more than<BR ALIGN="LEFT"/>the same MWh in Spain. Nobody publishes this number as a number:<BR ALIGN="LEFT"/>the two prices are published separately and the gap is left to the reader.<BR ALIGN="LEFT"/> >];
+
+    s_es -> s_pt [label=<<B>3 000 MW</B> scheduled<BR/>of 3 000 MW available<BR/><B>utilisation 100%, is_saturated</B>> penwidth=4 color="#b5761f"];
+    s_pt -> s_note [style=invis];
+  }
+
+  /* ---------------------------------------------------- the ordinary day */
+
+  subgraph cluster_coupled {
+    label=<<B>Coupled · the ordinary interval</B><BR/><FONT POINT-SIZE="10">one auction, one price, nothing to report</FONT>>;
+    fontsize=15; fontcolor="#2f8a54";
+    style="rounded,filled"; fillcolor="#f8fdfa"; color="#c8e6d2"; margin=18;
+
+    c_es [label=<<B>Spain</B><BR/>62.40 EUR/MWh<BR/><FONT POINT-SIZE="10">solar and wind clearing<BR/>the Spanish stack</FONT>>
+          fillcolor="#eefaf1" color="#2f8a54"];
+    c_pt [label=<<B>Portugal</B><BR/>62.40 EUR/MWh<BR/><FONT POINT-SIZE="10">the same price, to the cent</FONT>>
+          fillcolor="#eefaf1" color="#2f8a54"];
+    c_note [shape=note style="filled" fillcolor="#ffffff" color="#c8e6d2" fontsize=10
+            label=<<B>premium = 0.00</B><BR ALIGN="LEFT"/>The border still has room, so the cheaper<BR ALIGN="LEFT"/>Spanish units can serve Portuguese demand<BR ALIGN="LEFT"/>and both zones clear together.<BR ALIGN="LEFT"/> >];
+
+    c_es -> c_pt [label=<<B>1 900 MW</B> scheduled<BR/>of 3 000 MW available<BR/><B>utilisation 63%</B>> penwidth=2.5 color="#2f8a54"];
+    c_pt -> c_note [style=invis];
+  }
+
+}

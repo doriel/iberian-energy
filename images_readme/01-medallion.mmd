@@ -1,0 +1,37 @@
+---
+title: From published documents to the gold tables
+---
+flowchart LR
+  entsoe["<b>ENTSO-E</b><br/>prices · exchanges · capacity<br/>generation per unit · outage notices"]
+  omie["<b>OMIE</b><br/>day-ahead files"]
+  esios["<b>REE / ESIOS</b><br/>congestion rent · demand"]
+  meteo["<b>Open-Meteo</b><br/>radiation · wind"]
+
+  vol[("<b>Volume on S3</b><br/>raw payloads<br/>byte for byte")]
+  bronze["<b>bronze</b><br/>streaming tables<br/>over binaryFile"]
+  silver["<b>silver</b><br/>one row per<br/>settlement interval"]
+  gold["<b>gold</b><br/>one table per persona"]
+
+  manufacturer["<b>manufacturer</b><br/>daily profile<br/>when the premium lands"]
+  journalist["<b>journalist</b><br/>split episodes<br/>duration · cost · cause"]
+  analyst["<b>grid analyst</b><br/>unit hourly output<br/>against its own baseline"]
+  checks["<b>validations</b><br/>OMIE agreement<br/>rent vs REE"]
+
+  entsoe --> vol
+  omie --> vol
+  esios --> vol
+  meteo --> vol
+  vol -->|"Auto Loader"| bronze
+  bronze -->|"parsed on the executors"| silver
+  silver -->|"pandas, tested<br/>without a cluster"| gold
+  gold --> manufacturer
+  gold --> journalist
+  gold --> analyst
+  gold --> checks
+
+  classDef src fill:#f4f4f5,stroke:#71717a,stroke-width:1.5px,color:#111
+  classDef lake fill:#eef4fb,stroke:#3b6ea5,stroke-width:1.5px,color:#111
+  classDef persona fill:#eefaf1,stroke:#2f8a54,stroke-width:1.5px,color:#111
+  class entsoe,omie,esios,meteo src
+  class vol,bronze,silver,gold lake
+  class manufacturer,journalist,analyst,checks persona

@@ -1,0 +1,48 @@
+---
+title: What runs on a schedule, and what a person runs by hand
+config:
+  flowchart:
+    wrappingWidth: 400
+    rankSpacing: 60
+    nodeSpacing: 30
+    padding: 12
+---
+flowchart TB
+  subgraph job["The Job · five tasks, deployed by Databricks Asset Bundles from the Git branch"]
+    direction TB
+    cron(["<b>iberian-daily</b><br/>16:00 Europe/Lisbon, after the day-ahead results<br/>max_concurrent_runs 1 · failure email only"])
+    ingest["<b>ingest</b><br/>01_build_medallion<br/>lands three trailing days in the Volume<br/>same Volume 01f backfills into<br/>2 retries, 5 min apart"]
+    notices["<b>load_notices</b><br/>01b_load_notices<br/>A78 notices, vector index sync<br/>2 retries, off the path to publish"]
+    transform["<b>transform</b><br/>Lakeflow declarative pipeline<br/>bronze, silver, gold<br/>never full_refresh on a schedule"]
+    explain["<b>explain</b><br/>02_explain_episodes<br/>max_new 25 · notice_retrieval direct<br/>0 retries, a partial run already wrote"]
+    publish["<b>publish</b><br/>03_publish_dashboard<br/>commits data.json to the repo<br/>1 retry, reads the sha first"]
+
+    cron --> ingest
+    ingest --> notices
+    ingest --> transform
+    transform --> explain
+    explain --> publish
+  end
+
+  subgraph manual["Run by hand · one off or occasional"]
+    direction TB
+    setup["<b>00</b> notice index · <b>00b</b> Lakebase schema<br/><b>00c</b> service principal grants · <b>00d</b> change data feed<br/>run once, idempotent"]
+    gen["<b>01c</b> ingest generation · <b>01d</b> silver per unit<br/><b>01e</b> gold_unit_hourly_output"]
+    backfill["<b>01f_backfill_market_history</b><br/>chunked and resumable, you say how many days"]
+    sync["<b>04_sync_episodes_to_lakebase</b><br/>upsert into iberian.episodes<br/>after the Job has rebuilt gold"]
+    activity["<b>01g_build_application_activity</b><br/>reads lb_*_history, MERGE on a watermark"]
+    evaluate["<b>99_evaluate_retrieval</b><br/>direct against vector, point in time honest"]
+
+    setup ~~~ gen ~~~ backfill
+    sync ~~~ activity ~~~ evaluate
+  end
+
+  classDef task fill:#eef4fb,stroke:#3b6ea5,stroke-width:1.5px,color:#111
+  classDef hand fill:#fdf3e7,stroke:#b5761f,stroke-width:1.5px,color:#111
+  classDef trigger fill:#eefaf1,stroke:#2f8a54,stroke-width:1.5px,color:#111
+  class ingest,notices,transform,explain,publish task
+  class setup,gen,backfill,sync,activity,evaluate hand
+  class cron trigger
+
+  style job fill:#fbfdff,stroke:#c3d4e6,color:#1f3b57
+  style manual fill:#fffcf7,stroke:#e6d3b8,color:#6b4710

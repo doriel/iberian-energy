@@ -1,0 +1,34 @@
+---
+title: The loop, gold out to a person and what they did back into Delta
+config:
+  flowchart:
+    wrappingWidth: 420
+    rankSpacing: 55
+    nodeSpacing: 45
+    padding: 12
+---
+flowchart TB
+  gold["<b>gold</b><br/>gold_split_episodes · gold_interval_premium<br/>gold_daily_profile · gold_unit_hourly_output"]
+  reads["<b>Lakebase read model</b><br/>iberian.episodes, upserted by the daily Job"]
+  product["<b>Databricks App</b> and <b>Mosaic AI agent</b><br/>episode list and labelling, on behalf of the signed in user<br/>the agent sees retrieved facts only, never raw market data"]
+  writes["<b>Lakebase application tables</b><br/>alerts · episode_labels · agent_actions<br/>REPLICA IDENTITY FULL"]
+  hist["<b>lb_alerts_history · lb_episode_labels_history · lb_agent_actions_history</b><br/>in Delta, with _pg_change_type and _pg_lsn"]
+  back["<b>silver_application_events</b>, one row per change<br/>then <b>gold_application_activity</b>"]
+  eval["<b>evaluation</b><br/>the labels are the answer key<br/>grounded explanation rate"]
+
+  gold -->|"04, upsert on episode_key"| reads
+  reads -->|"single digit ms reads"| product
+  product -->|"create · update · delete, validated before the write"| writes
+  writes ==>|"<b>change data feed</b>, schema level<br/>read off the WAL, flushed about every 15s"| hist
+  hist -->|"01g, watermark per source, MERGE"| back
+  back -->|"the ground truth was written by a person"| eval
+  eval -.->|"what the agent got wrong changes what it retrieves"| product
+
+  classDef lakenode fill:#eef4fb,stroke:#3b6ea5,stroke-width:1.5px,color:#111
+  classDef pgnode fill:#fdf3e7,stroke:#b5761f,stroke-width:1.5px,color:#111
+  classDef prodnode fill:#eefaf1,stroke:#2f8a54,stroke-width:1.5px,color:#111
+  classDef cdfnode fill:#f6eefb,stroke:#7c4d9e,stroke-width:1.5px,color:#111
+  class gold,back,eval lakenode
+  class reads,writes pgnode
+  class product prodnode
+  class hist cdfnode

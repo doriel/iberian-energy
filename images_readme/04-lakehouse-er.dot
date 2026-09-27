@@ -1,0 +1,342 @@
+/*
+ * The lakehouse, raw to consume.
+ *
+ * Every Delta table in the project, arranged in the layer it belongs to, with
+ * the key each hop joins on written on the edge.
+ *
+ * Edit it free and without an account at https://edotor.net or
+ * https://dreampuf.github.io/GraphvizOnline. Paste the whole file in, change
+ * what you need, export PNG or SVG.
+ *
+ * Render locally:  dot -Tpng -Gdpi=140 04-lakehouse-er.dot -o 04-lakehouse-er.png
+ *
+ * The source of truth is pipelines/transformations/iberian_medallion.py for the
+ * declarative pipeline, and 01b, 01d, 01e, 01g and 02 for the tables built
+ * outside it. If this drawing and those disagree, they are right.
+ */
+
+digraph lakehouse {
+  rankdir=LR;
+  splines=spline;
+  nodesep=0.35;
+  ranksep=1.6;
+  bgcolor="white";
+  fontname="Helvetica";
+  labelloc="t";
+  fontsize=22;
+  label=<<B>The lakehouse, raw to consume</B><BR/><FONT POINT-SIZE="13">Every Delta table, the layer it belongs to, and the key each hop joins on</FONT><BR/> >;
+
+  node [shape=plaintext fontname="Helvetica"];
+  edge [fontname="Helvetica" fontsize=10 color="#6b7280" arrowsize=0.7];
+
+  /* ---------------------------------------------------------------- raw */
+
+  subgraph cluster_raw {
+    label=<<B>raw</B><BR/><FONT POINT-SIZE="10">Unity Catalog Volume on S3</FONT>>;
+    fontsize=15; fontcolor="#52525b";
+    style="rounded,filled"; fillcolor="#fafafa"; color="#d4d4d8"; margin=16;
+
+    volume [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5">
+        <TR><TD BGCOLOR="#71717a" COLSPAN="2"><FONT COLOR="white"><B>Volume: raw landing zone</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><B>path</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK. zone= and day= live here, the only<BR ALIGN="LEFT"/>place the zone reliably survives</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT">content</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">the payload byte for byte, never rewritten</FONT></TD></TR>
+        <TR><TD ALIGN="LEFT">modificationTime</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">becomes landed_at</FONT></TD></TR>
+        <TR><TD BGCOLOR="#f4f4f5" ALIGN="LEFT" COLSPAN="2"><FONT POINT-SIZE="9">ENTSO-E A44 A09 A61 A73 A78 · OMIE · REE ESIOS · Open-Meteo<BR ALIGN="LEFT"/>Landed by 01_build_medallion daily and 01f_backfill_market_history on demand</FONT></TD></TR>
+      </TABLE>>];
+
+    api [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5">
+        <TR><TD BGCOLOR="#71717a"><FONT COLOR="white"><B>ENTSO-E API, called directly</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="9">01b_load_notices calls the A78 endpoint and writes<BR ALIGN="LEFT"/>gold_transmission_notices itself. Nothing lands in the<BR ALIGN="LEFT"/>Volume and the declarative pipeline never sees it: the<BR ALIGN="LEFT"/>notice text is evidence for the agent, not a market series<BR ALIGN="LEFT"/>to be modelled through bronze and silver.</FONT></TD></TR>
+      </TABLE>>];
+  }
+
+  /* ------------------------------------------------------------- bronze */
+
+  subgraph cluster_bronze {
+    label=<<B>bronze</B><BR/><FONT POINT-SIZE="10">streaming tables over binaryFile, Auto Loader</FONT>>;
+    fontsize=15; fontcolor="#7c4d9e";
+    style="rounded,filled"; fillcolor="#fbf7fd"; color="#d8c4e6"; margin=16;
+
+    b_prices    [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#7c4d9e" COLSPAN="2"><FONT COLOR="white"><B>bronze_entsoe_prices</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>path</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">content</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">binary</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">landed_at</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">zone_label</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">from the path: an A44 payload<BR ALIGN="LEFT"/>does not always name the zone</FONT></TD></TR>
+      </TABLE>>];
+
+    b_sched  [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#7c4d9e" COLSPAN="2"><FONT COLOR="white"><B>bronze_entsoe_schedules</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>path</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · A09, both directions</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">content</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">binary</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">landed_at</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD></TR>
+      </TABLE>>];
+
+    b_cap    [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#7c4d9e" COLSPAN="2"><FONT COLOR="white"><B>bronze_entsoe_capacity</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>path</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · A61</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">content</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">binary</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">landed_at</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD></TR>
+      </TABLE>>];
+
+    b_omie   [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#7c4d9e" COLSPAN="2"><FONT COLOR="white"><B>bronze_omie</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>path</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · marginalpdbc files</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">content</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">binary</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">landed_at</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD></TR>
+      </TABLE>>];
+
+    b_meteo  [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#7c4d9e" COLSPAN="2"><FONT COLOR="white"><B>bronze_open_meteo</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>path</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · one per location and window</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">content</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">binary</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">landed_at</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD></TR>
+      </TABLE>>];
+
+    b_esios  [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#7c4d9e" COLSPAN="2"><FONT COLOR="white"><B>bronze_esios</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>path</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · one per indicator and window</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">content</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">binary</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">landed_at</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD></TR>
+      </TABLE>>];
+
+    b_cdf    [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#9a6fb8" COLSPAN="2"><FONT COLOR="white"><B>lb_*_history</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT" COLSPAN="2"><FONT POINT-SIZE="9">lb_alerts_history · lb_episode_labels_history<BR ALIGN="LEFT"/>lb_agent_actions_history</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">_pg_change_type</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">insert · delete<BR ALIGN="LEFT"/>update_preimage · update_postimage</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>_pg_lsn</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK with _sort_by</FONT></TD></TR>
+      <TR><TD BGCOLOR="#f6eefb" ALIGN="LEFT" COLSPAN="2"><FONT POINT-SIZE="9">Written by the Lakebase change data feed,<BR ALIGN="LEFT"/>not by the pipeline. Bronze in every way<BR ALIGN="LEFT"/>but the name.</FONT></TD></TR>
+      </TABLE>>];
+  }
+
+  /* ------------------------------------------------------------- silver */
+
+  subgraph cluster_silver {
+    label=<<B>silver</B><BR/><FONT POINT-SIZE="10">parsed on the executors, one row per settlement interval</FONT>>;
+    fontsize=15; fontcolor="#3b6ea5";
+    style="rounded,filled"; fillcolor="#f7fafd"; color="#c3d4e6"; margin=16;
+
+    s_prices [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_entsoe_prices</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>zone_eic</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · expect_or_drop not null</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · expect_or_drop not null</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">market_day</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">date</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">price_eur_mwh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">may be negative, and often is</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">resolution</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PT60M until 1 Oct 2025, PT15M after</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">series_mrid</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">which publication this came from</FONT></TD></TR>
+      </TABLE>>];
+
+    s_sched [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_entsoe_schedules</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>in_domain</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · EIC of the importing side</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>out_domain</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · EIC of the exporting side</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">quantity_mw</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">expect &gt;= 0, both directions kept</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">market_day</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">date</FONT></TD><TD></TD></TR>
+      </TABLE>>];
+
+    s_cap [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_entsoe_capacity</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>in_domain</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>out_domain</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">quantity_mw</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">forecasted capacity on the border</FONT></TD></TR>
+      </TABLE>>];
+
+    s_omie [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_omie_prices</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>market_day</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">date</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>period</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">int</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · 1..24 or 1..96</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">ts_utc</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">derived from period</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">price_first_eur_mwh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">Portugal</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">price_second_eur_mwh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">Spain</FONT></TD></TR>
+      </TABLE>>];
+
+    s_weather [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_weather</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>location</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · chosen for effect on price</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">zone</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PT or ES</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">wind_speed_100m_kmh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">shortwave_radiation_wm2</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD></TD></TR>
+      </TABLE>>];
+
+    s_esios [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_esios_indicators</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>indicator_id</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">int</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · 599 is congestion rent</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">market_day</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">date</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">value</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">REE's own published figure</FONT></TD></TR>
+      </TABLE>>];
+
+    s_gen [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_generation_per_unit</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>zone</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>unit_eic</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · 192 ES units, 73 PT</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>flow_direction</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · generation or consumption. Both<BR ALIGN="LEFT"/>positive, both A01, told apart only by<BR ALIGN="LEFT"/>in- against outBiddingZone_Domain</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">quantity_mw</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">always positive</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">psr_type</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">B04 CCGT, B14 nuclear, B19 wind</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">curve_type</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">A03 · a point holds until the next</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">resolution_minutes</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">int</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">705 ES rows are hourly among 2.19M</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">period_end_utc</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">where the last block ends</FONT></TD></TR>
+      </TABLE>>];
+
+    s_events [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#3b6ea5" COLSPAN="3"><FONT COLOR="white"><B>silver_application_events</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>source_table</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · alerts, episode_labels, agent_actions</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>pg_lsn, sort_by</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bigint</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · the watermark 01g merges on</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>change_type</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">tool, status, created_by</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">target_key</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">an episode_key when the change<BR ALIGN="LEFT"/>was a label</FONT></TD></TR>
+      </TABLE>>];
+  }
+
+  /* --------------------------------------------------------------- gold */
+
+  subgraph cluster_gold {
+    label=<<B>gold</B><BR/><FONT POINT-SIZE="10">one table per question somebody actually asks</FONT>>;
+    fontsize=15; fontcolor="#2f8a54";
+    style="rounded,filled"; fillcolor="#f8fdfa"; color="#c8e6d2"; margin=16;
+
+    g_interval [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_interval_premium</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · the spine every other gold table hangs off</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">price_pt_eur_mwh, price_es_eur_mwh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">premium_eur_mwh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PT minus ES</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">is_decoupled, premium_side, severity</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bool, string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">market splitting, detected here</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">net_flow_mw, capacity_mw, utilisation</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">the border, from schedules and capacity</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">is_saturated</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bool</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">the candidate cause</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">settlement_resolution</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PT60M and PT15M both appear</FONT></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Personas 1 and 3</FONT></TD></TR>
+      </TABLE>>];
+
+    g_profile [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_daily_profile</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>hour_of_day_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">int</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · 24 rows, that is the whole table</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">split_probability</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">when to run the equipment</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">mean_premium_eur_mwh, worst_premium_eur_mwh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Persona 1, the manufacturer</FONT></TD></TR>
+      </TABLE>>];
+
+    g_episodes [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_split_episodes</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">episode_id</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bigint</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">sequential within a run, not stable</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>market_day + start_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">date, ts</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK in practice. This pair is the<BR ALIGN="LEFT"/>episode_key, and it is content derived,<BR ALIGN="LEFT"/>so a backfill cannot orphan a label</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">duration_hours, peak_spread, max_severity</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double, string</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">extra_cost_eur</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">import direction only</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">congestion_rent_eur</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">both directions, comparable to REE</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">share_saturated, explained_by_saturation</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double, bool</FONT></TD><TD></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Persona 2, the journalist</FONT></TD></TR>
+      </TABLE>>];
+
+    g_weather [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_weather_context</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">premium_eur_mwh</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">wind_speed_100m_kmh, shortwave_radiation_wm2</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">the premium beside what drove it</FONT></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Personas 2 and 3</FONT></TD></TR>
+      </TABLE>>];
+
+    g_agree [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_price_source_agreement</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>ts_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">timestamp</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">price_pt_entsoe, price_pt_omie</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">agrees</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bool</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">two independent publishers,<BR ALIGN="LEFT"/>checked interval by interval</FONT></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Validation, not a persona</FONT></TD></TR>
+      </TABLE>>];
+
+    g_cost [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_cost_validation</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>market_day</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">date</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">our_rent_eur</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">both flow directions</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">congestion_rent_eur</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">REE, indicator 599</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">difference_pct</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">-0.0042% over 366 days</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">our_import_cost_eur</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">a different quantity, carried alongside</FONT></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Validation, against an outside authority</FONT></TD></TR>
+      </TABLE>>];
+
+    g_unit [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_unit_hourly_output</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>zone, unit_eic, hour_utc</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string, ts</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">output_mw, consumption_mw</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">time weighted over the expanded A03 blocks</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">baseline_mw</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">median of the same local hour over<BR ALIGN="LEFT"/>the 30 prior days. First 30 days have none</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">deviation_pct</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">null below a 1 MW baseline</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">looks_offline</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bool</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">a signal, not a finding. Corroborate<BR ALIGN="LEFT"/>against an A80 notice before attributing</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">published_at_utc, source_block_minutes</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">ts, int</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">provenance, per row</FONT></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Persona 3, the grid analyst</FONT></TD></TR>
+      </TABLE>>];
+
+    g_notices [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_transmission_notices</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>notice_id</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · A78 document mRID + series mRID</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">text</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">what gets embedded in the vector index</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">published_epoch</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bigint</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">the point in time filter lives here</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">outage_start_epoch, outage_end_epoch</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bigint</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">status, min_available_mw</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string, double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">planned or unplanned</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">breakpoints_json</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">the availability step function</FONT></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">The unstructured evidence layer. Delta CDF on,<BR ALIGN="LEFT"/>feeding a Databricks Vector Search index</FONT></TD></TR>
+      </TABLE>>];
+
+    g_expl [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_episode_explanations</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>episode_key</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK · market_day + start time</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">grounded</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bool</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">false means the numeric check refused it</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">text</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">empty when grounded is false. An explanation<BR ALIGN="LEFT"/>that failed verification is never shown</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">numeric_claims, unsupported</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">int, array</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">which numbers had no source</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">sources, model, generated_at</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">array, string, ts</FONT></TD><TD></TD></TR>
+      </TABLE>>];
+
+    g_activity [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+      <TR><TD BGCOLOR="#2f8a54" COLSPAN="3"><FONT COLOR="white"><B>gold_application_activity</B></FONT></TD></TR>
+      <TR><TD ALIGN="LEFT"><B>activity_date, tool, status</B></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">date, string</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">PK</FONT></TD></TR>
+      <TR><TD ALIGN="LEFT">events</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">bigint</FONT></TD><TD></TD></TR>
+      <TR><TD ALIGN="LEFT">tool_success_rate</TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">double</FONT></TD><TD ALIGN="LEFT"><FONT POINT-SIZE="9">ok against rejected against error,<BR ALIGN="LEFT"/>kept apart on purpose</FONT></TD></TR>
+      <TR><TD BGCOLOR="#eefaf1" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="9">Usage analytics and the GenAI evaluation dataset</FONT></TD></TR>
+      </TABLE>>];
+  }
+
+  /* -------------------------------------------------------------- edges */
+
+  volume -> b_prices [label="pathGlobFilter prices*"];
+  volume -> b_sched  [label="kind=A09"];
+  volume -> b_cap    [label="kind=A61"];
+  volume -> b_omie   [label="marginalpdbc*"];
+  volume -> b_meteo  [label="meteo*"];
+  volume -> b_esios  [label="esios*"];
+  volume -> s_gen    [label="A73 XML, read direct\nno bronze table" style=dashed];
+
+  b_prices -> s_prices  [label="one document\nmany intervals"];
+  b_sched  -> s_sched   [label="one document\nmany intervals"];
+  b_cap    -> s_cap     [label="one document\nmany intervals"];
+  b_omie   -> s_omie    [label="one file\n24 or 96 periods"];
+  b_meteo  -> s_weather [label="one payload\nmany hours"];
+  b_esios  -> s_esios   [label="one payload\nmany intervals"];
+  b_cdf    -> s_events  [label="MERGE on\npg_lsn and sort_by"];
+
+  s_prices -> g_interval [label="ts_utc\ntwo zones to one row"];
+  s_sched  -> g_interval [label="ts_utc\nnet flow"];
+  s_cap    -> g_interval [label="ts_utc\ncapacity"];
+
+  g_interval -> g_profile  [label="hour_of_day_utc" constraint=false];
+  g_interval -> g_episodes [label="contiguous decoupled ts_utc" constraint=false];
+  g_interval -> g_weather  [label="ts_utc" constraint=false];
+  s_weather  -> g_weather  [label="ts_utc and zone"];
+
+  s_prices -> g_agree [label="ts_utc"];
+  s_omie   -> g_agree [label="ts_utc"];
+
+  s_esios    -> g_cost [label="market_day\nindicator 599"];
+  g_episodes -> g_cost [label="market_day" constraint=false];
+
+  s_gen -> g_unit [label="zone, unit_eic\nhour_utc"];
+
+  g_episodes -> g_expl    [label="episode_key\none explanation each" constraint=false];
+  g_notices  -> g_expl    [label="retrieved, only where\npublished_epoch < start_utc" style=dashed constraint=false];
+  s_events   -> g_activity [label="activity_date and tool"];
+  g_episodes -> g_activity [label="target_key is an episode_key" style=dashed constraint=false];
+
+  api -> g_notices [label="A78 notices, fetched per day\nand MERGEd on notice_id" constraint=false];
+}

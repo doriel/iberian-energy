@@ -1,0 +1,144 @@
+/*
+ * How an explanation is produced, and why a number in it can be trusted.
+ *
+ * Drawn from src/iberian/agent/: batch.py builds the fact sheet, retrieval.py
+ * finds the notices, explain.py runs the loop, verify.py is the check.
+ *
+ * Edit it free and without an account at https://edotor.net or
+ * https://dreampuf.github.io/GraphvizOnline.
+ *
+ * Render:  dot -Tpng -Gdpi=130 07-agent-grounding.dot -o 07-agent-grounding.png
+ */
+
+digraph grounding {
+  rankdir=TB;
+  bgcolor="white";
+  fontname="Helvetica";
+  labelloc="t";
+  fontsize=22;
+  ranksep=0.65;
+  nodesep=0.5;
+  label=<<B>Grounded explanation, and the check that makes it one</B><BR/><FONT POINT-SIZE="13">The model phrases facts. It never produces a figure of its own, and that is enforced after generation, not asked for in a prompt.</FONT><BR/> >;
+
+  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=11 penwidth=1.4
+        fillcolor="#ffffff" color="#71717a"];
+  edge [fontname="Helvetica" fontsize=10 color="#52525b" arrowsize=0.8];
+
+  /* ------------------------------------------------ the retrieved evidence */
+
+  subgraph cluster_evidence {
+    label=<<B>1 · Everything the answer is allowed to contain</B><BR/><FONT POINT-SIZE="10">assembled by code, from tables and documents, before the model is called</FONT>>;
+    fontsize=14; fontcolor="#3b6ea5";
+    style="rounded,filled"; fillcolor="#f7fafd"; color="#c3d4e6"; margin=16;
+
+    episode [label=<<B>gold_split_episodes</B>, one row<BR/><FONT POINT-SIZE="10">start, end, duration, peak spread, premium side,<BR/>severity, cost, share_saturated. Every one of these<BR/>was computed by the pipeline, in pandas, under test.</FONT>>
+             fillcolor="#eef4fb" color="#3b6ea5"];
+
+    window [label=<<B>gold_interval_premium</B>, the episode's window<BR/><FONT POINT-SIZE="10">interval by interval prices, net flow,<BR/>capacity and utilisation</FONT>>
+            fillcolor="#eef4fb" color="#3b6ea5"];
+
+    notices [label=<<B>A78 outage notices that bind this window</B><BR/><FONT POINT-SIZE="10">asset, status planned or unplanned, the capacity that<BR/>remained available, the publication time</FONT>>
+             fillcolor="#eef4fb" color="#3b6ea5"];
+
+    pit [shape=note style=filled fillcolor="#fff8e6" color="#b5761f" fontsize=10
+         label=<<B>published_before = episode start</B><BR ALIGN="LEFT"/>A notice published after the episode began is<BR ALIGN="LEFT"/>excluded, on both retrieval paths. Without this the<BR ALIGN="LEFT"/>cause attribution accuracy leaks information from<BR ALIGN="LEFT"/>the future and the number means nothing.<BR ALIGN="LEFT"/> >];
+
+    sheet [label=<<B>FactSheet</B><BR/><FONT POINT-SIZE="10">a flat list of named facts: value, unit, source, note.<BR/>sheet.numbers() is the set of figures that may appear<BR/>in the answer. sheet.sources() is who published each one.</FONT>>
+           fillcolor="#dbe9f7" color="#3b6ea5" penwidth=2];
+
+    episode -> sheet [label="episode_facts()"];
+    window  -> sheet [label="the interval series"];
+    notices -> sheet [label="binding(), only the assets\nwhose availability drops\ninside the window"];
+    notices -> pit [style=dashed arrowhead=none color="#b5761f"];
+  }
+
+  /* --------------------------------------------------------- the two paths */
+
+  subgraph cluster_paths {
+    label=<<B>Two retrieval paths, and why both exist</B>>;
+    fontsize=13; fontcolor="#7c4d9e";
+    style="rounded,filled"; fillcolor="#fbf7fd"; color="#d8c4e6"; margin=14;
+
+    direct [label=<<B>notice_retrieval = direct</B><BR/><FONT POINT-SIZE="10">calls ENTSO-E for that market day.<BR/>What production uses, because an index<BR/>is only as fresh as its last sync and a<BR/>fifteen minute claim does not survive a<BR/>retrieval path that can be a day behind.</FONT>>
+            fillcolor="#f6eefb" color="#7c4d9e"];
+    vector [label=<<B>notice_retrieval = vector</B><BR/><FONT POINT-SIZE="10">Databricks Vector Search over<BR/>gold_transmission_notices, filtered on<BR/>published_epoch &lt;= start - 1s.<BR/>Measured against direct in<BR/>99_evaluate_retrieval.</FONT>>
+            fillcolor="#f6eefb" color="#7c4d9e"];
+  }
+
+  /* ------------------------------------------------------------ generation */
+
+  subgraph cluster_model {
+    label=<<B>2 · The model, given the sheet and nothing else</B>>;
+    fontsize=14; fontcolor="#2f8a54";
+    style="rounded,filled"; fillcolor="#f8fdfa"; color="#c8e6d2"; margin=16;
+
+    prompt [label=<<B>sheet.render() into the prompt</B><BR/><FONT POINT-SIZE="10">Databricks model serving endpoint, traced to MLflow</FONT>>
+            fillcolor="#eefaf1" color="#2f8a54"];
+
+    never [shape=note style=filled fillcolor="#ffffff" color="#c8e6d2" fontsize=10
+           label=<<B>What the model never sees</B><BR ALIGN="LEFT"/>the raw XML, the Delta tables, the Volume, a SQL<BR ALIGN="LEFT"/>connection, Lakebase, or any tool that could fetch<BR ALIGN="LEFT"/>a figure. It receives text and returns text.<BR ALIGN="LEFT"/> >];
+
+    draft [label=<<B>a draft explanation</B><BR/><FONT POINT-SIZE="10">prose, naming its sources</FONT>>
+           fillcolor="#eefaf1" color="#2f8a54"];
+
+    prompt -> draft;
+    prompt -> never [style=dashed arrowhead=none color="#2f8a54"];
+  }
+
+  /* ---------------------------------------------------------- verification */
+
+  subgraph cluster_check {
+    label=<<B>3 · The check, in code, on every draft</B><BR/><FONT POINT-SIZE="10">verify.py · a prompt is a request, this is a guarantee</FONT>>;
+    fontsize=14; fontcolor="#b5761f";
+    style="rounded,filled"; fillcolor="#fffcf7"; color="#e6d3b8"; margin=16;
+
+    extract [label=<<B>extract every number and every date from the text</B><BR/><FONT POINT-SIZE="10">retrieved asset names are masked out first, so an EIC code<BR/>inside a name is not read as a numeric claim</FONT>>
+             fillcolor="#fdf3e7" color="#b5761f"];
+
+    match [shape=plaintext style="" label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5" BGCOLOR="white">
+        <TR><TD BGCOLOR="#b5761f" COLSPAN="2"><FONT COLOR="white"><B>What counts as supported</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT">exact</TD><TD ALIGN="LEFT">3195.0 and "3,195 MW" are the same figure</TD></TR>
+        <TR><TD ALIGN="LEFT">rounded</TD><TD ALIGN="LEFT">the retrieved value rounded to the precision the writer<BR ALIGN="LEFT"/>actually used. "roughly 3,200 MW" is a faithful reading of 3195</TD></TR>
+        <TR><TD ALIGN="LEFT">unit</TD><TD ALIGN="LEFT">a declared ratio written as a percentage: 1.0 and "100%"</TD></TR>
+        <TR><TD BGCOLOR="#fffcf7" ALIGN="LEFT" COLSPAN="2"><FONT POINT-SIZE="9"><B>Nothing else.</B> No tolerance band. "Close enough within 10%" would<BR ALIGN="LEFT"/>accept 3,500 for 3,195, which is a different number about a different<BR ALIGN="LEFT"/>border, and the check would be theatre.</FONT></TD></TR>
+      </TABLE>>];
+
+    verdict [shape=diamond style=filled fillcolor="#fdf3e7" color="#b5761f" fontsize=11
+             label=<<B>Verdict</B><BR/><FONT POINT-SIZE="10">every number retrieved,<BR/>every date in the evidence,<BR/>at least one source named</FONT>>];
+
+    extract -> match [style=dashed arrowhead=none color="#b5761f"];
+    extract -> verdict;
+  }
+
+  /* ---------------------------------------------------------- the outcomes */
+
+  subgraph cluster_out {
+    label=<<B>4 · What is written down, either way</B>>;
+    fontsize=14; fontcolor="#3b6ea5";
+    style="rounded,filled"; fillcolor="#f7fafd"; color="#c3d4e6"; margin=16;
+
+    ok [label=<<B>grounded = true</B><BR/><FONT POINT-SIZE="10">text published to gold_episode_explanations,<BR/>to the dashboard and to the app</FONT>>
+        fillcolor="#eefaf1" color="#2f8a54" penwidth=2];
+
+    fail [label=<<B>grounded = false, text empty</B><BR/><FONT POINT-SIZE="10">the row is still written, with numeric_claims,<BR/>unsupported and rejected_drafts. An explanation<BR/>that failed verification is never shown to a reader,<BR/>and the failure is kept so it can be counted.</FONT>>
+          fillcolor="#fdecec" color="#b91c1c" penwidth=2];
+
+    metric [shape=note style=filled fillcolor="#ffffff" color="#c3d4e6" fontsize=10
+            label=<<B>The north star</B><BR ALIGN="LEFT"/>share of significant anomalies that get a correct,<BR ALIGN="LEFT"/>grounded explanation within 15 minutes of publication.<BR ALIGN="LEFT"/>Correct is judged against the human labels, which arrive<BR ALIGN="LEFT"/>back through the Lakebase change data feed.<BR ALIGN="LEFT"/> >];
+  }
+
+  /* ----------------------------------------------------------------- flow */
+
+  direct -> notices [label="per market day"];
+  vector -> notices [label="k nearest, filtered"];
+
+  sheet  -> prompt [label="the rendered sheet is the entire input" penwidth=2];
+  draft  -> extract;
+  verdict -> ok   [label="  ok" color="#2f8a54" penwidth=2];
+  verdict -> prompt [label="  rejected: the offending figures are named back\l  to the model and it drafts again. max_attempts = 2,\l  because a third try is a different answer, not a fix.\l"
+                     color="#b91c1c" style=dashed constraint=false];
+  verdict -> fail [label="  still rejected after the last attempt" color="#b91c1c"];
+  ok   -> metric [style=dashed arrowhead=none color="#c3d4e6"];
+  fail -> metric [style=dashed arrowhead=none color="#c3d4e6"];
+}
