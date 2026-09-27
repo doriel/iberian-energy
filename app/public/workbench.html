@@ -48,6 +48,17 @@
   .row > div { flex: 1 1 130px; }
   .muted { color: var(--muted); }
   .empty { color: var(--muted); padding: 14px 0; font-style: italic; }
+  .pager { display: flex; align-items: center; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .pager button {
+    background: transparent; color: var(--accent); border: 1px solid var(--line);
+    padding: 5px 10px; font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .pager button[aria-current="true"] {
+    border-color: var(--accent); color: var(--ink); font-weight: 600;
+  }
+  .pager button:disabled { opacity: .4; cursor: default; }
+  .pager .gap { color: var(--muted); padding: 0 2px; }
+  .pager .of { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .error {
     color: var(--bad); border-left: 3px solid var(--bad); padding: 8px 12px;
     background: color-mix(in srgb, var(--bad) 8%, transparent); border-radius: 0 6px 6px 0;
@@ -214,7 +225,47 @@ async function call(url, options) {
   }
 }
 
-function render(target, payload, build) {
+// --- paging -----------------------------------------------------------------
+//
+// Five rows at a time, in every panel, because `render` is the one place all
+// four of them pass through. Client side: the rows already arrived, so a page
+// change is a slice and not a round trip to Lakebase.
+//
+// The page number lives here rather than in each loader, keyed by the element
+// the rows are rendered into, so a reload that returns a shorter list does not
+// leave the reader on a page that no longer exists.
+
+const PER_PAGE = 5;
+const PAGE = {};
+
+function pageNumbers(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const near = [current - 1, current, current + 1].filter((n) => n > 1 && n < total);
+  const out = [];
+  for (const n of [1, ...near, total]) {
+    if (out.length && n - out[out.length - 1] > 1) out.push("gap");
+    out.push(n);
+  }
+  return out;
+}
+
+function pagerMarkup(page, count, total, label) {
+  if (count <= 1) return "";
+  const step = (to, text, off) =>
+    `<button type="button" data-page="${to}" ${off ? "disabled" : ""}>${text}</button>`;
+  return `<nav class="pager" aria-label="${label} pages">
+    ${step(page - 1, "Previous", page === 1)}
+    ${pageNumbers(page, count).map((n) => n === "gap"
+      ? `<span class="gap">…</span>`
+      : `<button type="button" data-page="${n}" aria-current="${n === page}"
+           aria-label="Page ${n}">${n}</button>`).join("")}
+    ${step(page + 1, "Next", page === count)}
+    <span class="of">${(page - 1) * PER_PAGE + 1}–${Math.min(page * PER_PAGE, total)}
+      of ${total}</span>
+  </nav>`;
+}
+
+function render(target, payload, build, label = "rows") {
   const node = $(target);
   if (endedSession(payload)) {
     location.href = "/signin";
@@ -225,7 +276,26 @@ function render(target, payload, build) {
     return;
   }
   const rows = payload.rows ?? [];
-  node.innerHTML = rows.length ? build(rows) : `<p class="empty">Nothing here yet.</p>`;
+  if (!rows.length) {
+    PAGE[target] = 1;
+    node.innerHTML = `<p class="empty">Nothing here yet.</p>`;
+    return;
+  }
+
+  const count = Math.ceil(rows.length / PER_PAGE);
+  const page = Math.min(Math.max(PAGE[target] ?? 1, 1), count);
+  PAGE[target] = page;
+
+  node.innerHTML =
+    build(rows.slice((page - 1) * PER_PAGE, page * PER_PAGE)) +
+    pagerMarkup(page, count, rows.length, label);
+
+  node.querySelectorAll(".pager button[data-page]").forEach((button) =>
+    button.addEventListener("click", () => {
+      PAGE[target] = Number(button.dataset.page);
+      render(target, payload, build, label);
+      node.scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
 }
 
 // --- episodes ---------------------------------------------------------------
@@ -276,7 +346,10 @@ function episodeRow(row) {
 async function loadEpisodes() {
   $("episodes").innerHTML = `<p class="muted spin">Loading</p>`;
   const only = $("only-mine").value;
-  const payload = await call(`/api/episodes?limit=25&unlabelled_only=${only}`);
+  // 200 rather than the 25 this asked for before the list was paginated. The
+  // pager only means something if the rows behind it are really there, and a
+  // couple of hundred small rows out of Lakebase is one fast read.
+  const payload = await call(`/api/episodes?limit=200&unlabelled_only=${only}`);
   render("episodes", payload, (rows) => `
     <table>
       <thead><tr>
@@ -284,7 +357,7 @@ async function loadEpisodes() {
         <th>Cause</th><th>Confidence</th><th></th>
       </tr></thead>
       <tbody>${rows.map(episodeRow).join("")}</tbody>
-    </table>`);
+    </table>`, "episode");
 }
 
 $("episodes").addEventListener("click", async (event) => {
@@ -330,7 +403,7 @@ async function loadAlerts() {
           <td>${row.active ? "active" : "off"}</td>
           <td><button class="danger" data-delete="${row.id}">Delete</button></td>
         </tr>`).join("")}</tbody>
-    </table>`);
+    </table>`, "alert");
 }
 
 $("alerts").addEventListener("click", async (event) => {
@@ -377,7 +450,7 @@ async function loadLabels() {
           <td>${escape(row.confidence)}</td>
           <td class="muted">${escape(row.notes || "")}</td>
         </tr>`).join("")}</tbody>
-    </table>`);
+    </table>`, "judgement");
 }
 
 async function loadActivity() {
@@ -391,7 +464,7 @@ async function loadActivity() {
           <td class="num">${row.calls}</td>
           <td class="num">${number(row.avg_ms, 0)}</td>
         </tr>`).join("")}</tbody>
-    </table>`);
+    </table>`, "tool");
 }
 
 // --- the agent ----------------------------------------------------------------
@@ -484,7 +557,13 @@ async function send() {
 $("send").addEventListener("click", send);
 $("question").addEventListener("keydown", (event) => { if (event.key === "Enter") send(); });
 $("reload-episodes").addEventListener("click", loadEpisodes);
-$("only-mine").addEventListener("change", loadEpisodes);
+$("only-mine").addEventListener("change", () => {
+  // A different filter is a different list, so it starts at the top of it.
+  // Reload and a saved judgement deliberately do not reset: the clamp in
+  // `render` keeps you on the page you were reading as the list shortens.
+  PAGE["episodes"] = 1;
+  loadEpisodes();
+});
 
 // --- the visitor ---------------------------------------------------------------
 

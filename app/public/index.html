@@ -193,6 +193,19 @@ select, input[type="search"] {
 .kv .k { color: var(--ink-muted); }
 .kv .v { font-variant-numeric: tabular-nums; }
 .empty { color: var(--ink-2); padding: 28px 4px; text-align: center; }
+
+/* --- pager ---------------------------------------------------------------- */
+.pager { display: flex; align-items: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.pager button {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--hairline);
+  border-radius: 8px; padding: 6px 11px; font: inherit; font-size: 13.5px;
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.pager button:hover:not(:disabled) { background: var(--wash); }
+.pager button[aria-current="true"] { border-color: var(--series-1); color: var(--ink); font-weight: 600; }
+.pager button:disabled { opacity: 0.4; cursor: default; }
+.pager .gap { color: var(--ink-muted); padding: 0 2px; }
+.pager .of { margin-left: auto; font-size: 13px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
 .caveat { font-size: 13px; color: var(--ink-2); border-left: 2px solid var(--axis); padding-left: 12px; margin: 16px 0 0; max-width: 72ch; }
 footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--hairline); font-size: 13px; color: var(--ink-muted); }
 footer a { color: var(--ink-2); }
@@ -269,6 +282,7 @@ footer a { color: var(--ink-2); }
       <span class="count" id="f-count"></span>
     </div>
     <div id="episodes"></div>
+    <nav class="pager" id="episodes-pager" aria-label="Episode pages"></nav>
   </div>
 </section>
 
@@ -616,6 +630,55 @@ function renderTiles() {
 
 function severityClass(s) { return ['severe', 'moderate', 'minor'].includes(s) ? s : 'none'; }
 
+/* --- paging ----------------------------------------------------------------
+   Five at a time. A year of market history is several hundred episodes, and a
+   page that renders all of them costs a scrollbar nobody reads to the bottom
+   of. The filters above are the way to find a specific one; this is for
+   reading down the list.
+
+   Client side on purpose: the whole set already arrived in data.json, so a
+   page change is a slice and not a request. */
+
+const PER_PAGE = 5;
+let episodePage = 1;
+
+/** Page numbers to show, with gaps: 1 … 4 5 6 … 20. Always the first, the
+ *  last, and the current one with a neighbour either side. */
+function pageNumbers(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const near = [current - 1, current, current + 1].filter(n => n > 1 && n < total);
+  const shown = [1, ...near, total];
+  const out = [];
+  for (const n of shown) {
+    if (out.length && n - out[out.length - 1] > 1) out.push('gap');
+    out.push(n);
+  }
+  return out;
+}
+
+function renderPager(hostId, page, count, total, label, go) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  if (count <= 1) { host.innerHTML = ''; return; }
+
+  const step = (to, text, disabled) =>
+    `<button type="button" data-go="${to}" ${disabled ? 'disabled' : ''}>${text}</button>`;
+
+  host.innerHTML =
+    step(page - 1, 'Previous', page === 1) +
+    pageNumbers(page, count).map(n =>
+      n === 'gap'
+        ? '<span class="gap">…</span>'
+        : `<button type="button" data-go="${n}" aria-current="${n === page}"
+             aria-label="Page ${n}">${n}</button>`).join('') +
+    step(page + 1, 'Next', page === count) +
+    `<span class="of">${(page - 1) * PER_PAGE + 1}–${Math.min(page * PER_PAGE, total)}
+       of ${total} ${label}</span>`;
+
+  host.querySelectorAll('button[data-go]').forEach(button =>
+    button.addEventListener('click', () => go(Number(button.dataset.go))));
+}
+
 function renderEpisodes() {
   const day = document.getElementById('f-day').value;
   const sev = document.getElementById('f-sev').value;
@@ -638,10 +701,23 @@ function renderEpisodes() {
   const host = document.getElementById('episodes');
   if (!rows.length) {
     host.innerHTML = '<p class="empty">No episode matches these filters.</p>';
+    document.getElementById('episodes-pager').innerHTML = '';
     return;
   }
 
-  host.innerHTML = rows.map(e => {
+  // Clamp rather than reset. Narrowing a filter while on page nine should land
+  // on the last page that exists, not throw the reader back to the first.
+  const pageCount = Math.ceil(rows.length / PER_PAGE);
+  episodePage = Math.min(Math.max(episodePage, 1), pageCount);
+  const visible = rows.slice((episodePage - 1) * PER_PAGE, episodePage * PER_PAGE);
+
+  renderPager('episodes-pager', episodePage, pageCount, rows.length, 'episodes', to => {
+    episodePage = to;
+    renderEpisodes();
+    host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  host.innerHTML = visible.map(e => {
     const sources = (e.sources || []).map(s => `<span class="chip src">${s}</span>`).join('');
     const prose = e.explanation
       ? `<p class="prose">${e.explanation}</p>
@@ -792,8 +868,12 @@ fetch('data.json')
     renderTiles();
     renderEpisodes();
     renderCharts();
+    // A new filter is a new list, so it starts at the top of it.
     ['f-day', 'f-sev', 'f-sort'].forEach(id =>
-      document.getElementById(id).addEventListener('change', renderEpisodes));
+      document.getElementById(id).addEventListener('change', () => {
+        episodePage = 1;
+        renderEpisodes();
+      }));
     let stored = null;
     try { stored = localStorage.getItem('theme'); } catch (e) { /* private window */ }
     if (stored) applyTheme(stored);
