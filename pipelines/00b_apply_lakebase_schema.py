@@ -22,15 +22,26 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("project", "doriel-capstone-lakebase", "Lakebase project")
+dbutils.widgets.text("project", "", "Lakebase project")
 dbutils.widgets.text("branch", "production", "Branch")
 dbutils.widgets.text("endpoint_id", "primary", "Endpoint")
 dbutils.widgets.text("sql_file", "sql/001_application_tables.sql", "SQL file")
 
-PROJECT = dbutils.widgets.get("project")
+# The project name is a parameter with no default on purpose. It is not a
+# secret and it opens nothing without an OAuth credential, but this repository
+# is public and there is no reason to hand a reader the name of the database
+# this runs against. A run says what it was pointed at; the file does not.
+PROJECT = dbutils.widgets.get("project").strip()
 BRANCH = dbutils.widgets.get("branch")
 ENDPOINT_ID = dbutils.widgets.get("endpoint_id")
 SQL_FILE = dbutils.widgets.get("sql_file")
+
+if not PROJECT:
+    raise ValueError(
+        "Set the project widget to the Lakebase project name. "
+        "`databricks postgres list-projects` lists them, or read it off the "
+        "Compute page under Lakebase."
+    )
 
 ENDPOINT = f"projects/{PROJECT}/branches/{BRANCH}/endpoints/{ENDPOINT_ID}"
 

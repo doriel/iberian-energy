@@ -42,14 +42,28 @@ import os
 
 dbutils.widgets.text("catalog", "bootcamp_students", "Catalog")
 dbutils.widgets.text("schema", "doriel", "Schema")
-dbutils.widgets.text("project", "doriel-capstone-lakebase", "Lakebase project")
+dbutils.widgets.text("project", "", "Lakebase project")
 dbutils.widgets.text("branch", "production", "Branch")
 dbutils.widgets.text("endpoint_id", "primary", "Endpoint")
+dbutils.widgets.text("host", "", "Endpoint host (blank: LAKEBASE_HOST)")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
+
+# Neither the project name nor the endpoint host is defaulted here. Neither is
+# a secret, and neither gets anybody in without an OAuth credential, but this
+# repository is public and they are infrastructure that nobody reading it needs
+# to be handed. They are parameters, and a run says what it is pointed at.
+PROJECT = dbutils.widgets.get("project").strip()
+if not PROJECT:
+    raise ValueError(
+        "Set the project widget to the Lakebase project name. "
+        "`databricks postgres list-projects` lists them, or read it off the "
+        "Compute page under Lakebase."
+    )
+
 ENDPOINT = (
-    f"projects/{dbutils.widgets.get('project')}"
+    f"projects/{PROJECT}"
     f"/branches/{dbutils.widgets.get('branch')}"
     f"/endpoints/{dbutils.widgets.get('endpoint_id')}"
 )
@@ -151,9 +165,17 @@ print(f"{len(rows)} episode(s) from gold")
 
 # COMMAND ----------
 
+HOST = dbutils.widgets.get("host").strip() or os.environ.get("LAKEBASE_HOST", "")
+if not HOST:
+    raise ValueError(
+        "No endpoint host. Fill the host widget, or set LAKEBASE_HOST.\n"
+        "Use the endpoint's own host and NOT the -pooler one: the pooler "
+        "refuses the generated credential with 'SASL authentication failed', "
+        "cached or fresh alike."
+    )
+
 store = Lakebase(
-    host=os.environ.get("LAKEBASE_HOST")
-    or "ep-dry-river-d16e0gjf.database.us-west-2.cloud.databricks.com",
+    host=HOST,
     user=spark.sql("SELECT current_user()").first()[0],
     credential_factory=databricks_credentials(ENDPOINT),
 )
