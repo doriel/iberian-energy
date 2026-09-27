@@ -94,7 +94,7 @@ never share values.
 | Market splitting detection | **done**, with episode grouping and correct arithmetic across the PT60M to PT15M change |
 | Interconnection saturation as the mechanism | **done**, verified interval by interval |
 | Attribution to named transmission assets | **done**, with the unexplained remainder reported explicitly |
-| Point in time correctness | **done**, enforced server side via `periodStartUpdate`, client side in `binding_assets`, and in the vector index filter. Measured by `99_evaluate_retrieval` |
+| Point in time correctness | **done and measured**. 0 future notices retrieved with the filter, 1,151 without it across 277 of 377 episodes. See below |
 | Cross source price validation | **done**, as a gold table, not a script |
 | Cost figure validated against the system operator | **done**, as a gold table, rent against rent, over 366 days |
 | A generation unit against its own baseline | **done**, `gold_unit_hourly_output`, 30 day median of the same local hour |
@@ -256,6 +256,39 @@ Writing a verifier that never rejects honest text is harder than writing the
 verifier, and a check that cries wolf trains you to ignore it. And a check
 narrowed to stop false positives can silently stop checking: the fix to defect 1
 removed a whole class of error from view, and nothing failed to announce it.
+
+### Retrieval, against itself with the filter turned off
+
+Run on 27 September 2026 over the 377 episodes that carry an explanation, with
+no days unavailable. Written to `gold_retrieval_evaluation`, one row per
+episode.
+
+| | |
+|---|---|
+| Agreement on the tightest asset, direct against vector | **375 of 377** |
+| Future notices retrieved **with** the publication filter | **0** |
+| Future notices retrieved **without** it | **1,151** |
+| Episodes that had at least one to exclude | **277 of 377** |
+
+**The second number alone would be worthless.** A filter that excludes nothing
+also reports zero future notices, and a project that printed only that figure
+would be claiming point in time correctness on the strength of a measurement
+that cannot fail. The unfiltered count is printed beside it for that reason, and
+it is large: 277 of 377 episodes, nearly three quarters, had at least one notice
+published after they began that would have been retrieved as evidence for what
+caused them. Every one of those would have been hindsight presented as
+explanation, and the accuracy numbers built on them would have been inflated by
+information from the future.
+
+**The two disagreements are not yet explained.** Two episodes out of 377 return
+a different tightest asset from the two paths. That is 0.5% and it does not
+change the headline, but it is unresolved rather than understood, and the rows
+are in the table for whoever looks next.
+
+**What this does not measure.** Whether the retrieved asset is the right cause.
+That is the labelled evaluation set, a different question with a human in it.
+This asks only whether two mechanisms agree and whether one of them can see the
+future.
 
 ### A generation unit against its own history
 
@@ -462,6 +495,9 @@ Things that are known to be unresolved, kept here rather than left implicit.
   demonstrated by its tests rather than by use, and that distinction should be
   made out loud rather than left for someone to notice. The date check is the
   exception: it caught three real errors on its first run.
+- Two of 377 episodes get a different tightest asset from the direct and the
+  vector retrieval paths. 0.5%, unresolved rather than understood. The rows are
+  in `gold_retrieval_evaluation`.
 - Small rejected values, 0.23 and 0.44 among them, have not been checked for
   whether they are rounding false negatives in the verifier. They may be a
   seventh defect and they have not been looked at.
@@ -504,7 +540,8 @@ end to end. What remains is evidence and presentation, not infrastructure.
 1. **Label 20 to 25 episodes in the workbench**, so the change data feed carries
    real rows rather than test ones and `gold_application_activity` has something
    to aggregate.
-2. **Run `99_evaluate_retrieval`** and record the agreement and the leak figures.
+2. ~~Run `99_evaluate_retrieval`.~~ **Done**, 27 September. 375 of 377
+   agreement, 0 leaked with the filter, 1,151 without it.
 3. **The presentation.**
 
 ### Not doing, and why

@@ -581,6 +581,7 @@ notebooks, and each exception has a reason:
 | `gold_unit_hourly_output` | `01e` | same |
 | `gold_episode_explanations` | `02_explain_episodes` | the pipeline runs before the explanations exist, so a pipeline owned copy would always be a day behind |
 | `silver_application_events`, `gold_application_activity` | `01g` | their source is the Lakebase change feed, which lands outside the pipeline's own graph |
+| `gold_retrieval_evaluation` | `99_evaluate_retrieval` | a measurement of the retrieval, run when it is worth measuring, not derived from the market data on a schedule |
 
 Every table, every key and every join is in
 [`images_readme/04-lakehouse-er.png`](images_readme/04-lakehouse-er.png). The
@@ -998,7 +999,29 @@ because those two values are what the reader sees.
 it, and both are checked for notices published after the episode began. With the
 filter the count must be zero. Without it, the count is the size of the problem
 the filter solves, and reporting it is what turns "we handled point in time
-correctness" from a claim into a measurement.
+correctness" from a claim into a measurement. A zero that is zero because
+nothing was tested is worthless, so both counts are printed side by side.
+
+Every episode is written to `gold_retrieval_evaluation`, so the headline is a
+row somebody else can re-run the query for:
+
+```sql
+SELECT count(*)                                   AS episodes,
+       sum(CASE WHEN agree THEN 1 ELSE 0 END)     AS agreeing,
+       sum(leaked_with_filter)                    AS leaked_with_filter,
+       sum(leaked_without_filter)                 AS leaked_without_filter,
+       sum(CASE WHEN leaked_without_filter > 0 THEN 1 ELSE 0 END) AS episodes_at_risk
+FROM bootcamp_students.doriel.gold_retrieval_evaluation;
+
+-- The two disagreements, which are the rows worth reading
+SELECT * FROM bootcamp_students.doriel.gold_retrieval_evaluation
+WHERE NOT agree;
+```
+
+The run of 27 September 2026, over 377 episodes with an explanation and no days
+unavailable: agreement **375 of 377**, **0** future notices retrieved with the
+filter, **1,151** without it across **277** episodes. Three quarters of the
+episodes had something to exclude, which is what makes the zero mean something.
 
 ---
 

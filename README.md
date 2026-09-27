@@ -301,6 +301,25 @@ date check is the one that has caught something real. Under the same rules
 the larger model never makes the date slip, the retry catches it for the smaller
 one, and what reaches a reader is the same.
 
+**Retrieval, against itself with the filter turned off.** Both retrieval paths
+were asked the same question for all 377 episodes that carry an explanation:
+which transmission asset was tightest, and at what capacity. They agree on
+**375 of 377**. The same retrieval was then run with the publication filter and
+without it, and both results checked for notices published after the episode
+began:
+
+| | |
+|---|---|
+| Future notices retrieved **with** the filter | **0** |
+| Future notices retrieved **without** it | **1,151**, across 277 of the 377 episodes |
+
+The second row is the one that matters. A zero on its own would be worthless,
+because a filter that excludes nothing also reports zero. Nearly three quarters
+of the episodes had at least one notice published after they began that would
+otherwise have been retrieved as evidence, so the filter is excluding something
+real. Every episode is kept in `gold_retrieval_evaluation`, so the figure is one
+somebody else can re-run the query for rather than one quoted from a slide.
+
 **Generation, against a unit's own history.** `gold_unit_hourly_output` compares
 every unit hour against the median of the same local hour over the 30 prior
 days. Vandellos II, a Spanish nuclear station, appears at 0 MW against a
