@@ -68,6 +68,18 @@ CREATE INDEX IF NOT EXISTS episodes_market_day_idx
 CREATE INDEX IF NOT EXISTS episodes_severity_idx
     ON iberian.episodes (severity, peak_abs_spread DESC);
 
+-- This one was missed when the schema was first written, on the reasoning that
+-- the application never writes here so there is nothing to capture. That was
+-- wrong: the daily Job upserts every episode into this table, and without FULL
+-- the change feed carries those updates with only the primary key. The
+-- `update_preimage` rows come through empty, so "what changed about this
+-- episode" is unanswerable from the history table.
+--
+-- Found by `00d_enable_lakebase_cdf`, which reads replica identity out of
+-- Postgres rather than trusting this file, which is the reason it reads it out
+-- of Postgres.
+ALTER TABLE iberian.episodes REPLICA IDENTITY FULL;
+
 COMMENT ON TABLE iberian.episodes IS
     'Market splitting episodes, copied from gold_split_episodes by the daily Job. Read only to the application: the agent never writes here.';
 COMMENT ON COLUMN iberian.episodes.capacity_percentile IS
