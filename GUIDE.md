@@ -16,7 +16,7 @@ Start here for the local loop, which is where development happens, then
 - [The Lakebase half](#the-lakebase-half)
 - [The backfills](#the-backfills)
 - [The notice index, and the two retrieval paths](#the-notice-index-and-the-two-retrieval-paths)
-- [The daily Job](#the-daily-job)
+- [The two Jobs](#the-two-jobs)
 - [Continuous integration](#continuous-integration)
 - [Tracing and experiments](#tracing-and-experiments)
 - [The evaluation set](#the-evaluation-set)
@@ -107,7 +107,8 @@ sql/                               the Lakebase schema and its grants
 images_readme/                     the figures in README.md, with their sources
 scripts/                           every entry point, see the sections below
 tests/                             synthetic data, no network, no credentials
-resources/iberian_job.yml          the daily Job
+resources/iberian_job.yml          the daily Job, six tasks, on a clock
+resources/iberian_activity_job.yml the activity Job, on a table update trigger
 databricks.yml                     the Asset Bundle
 .github/workflows/ci.yml           tests and checks on every push
 ```
@@ -749,7 +750,7 @@ the four tables are in
 
 | Table | Written by | What it is |
 |---|---|---|
-| `iberian.episodes` | the daily Job, `04` | a small copy of what gold knows about each episode |
+| `iberian.episodes` | the daily Job, `sync_lakebase` task | a small copy of what gold knows about each episode |
 | `iberian.alerts` | the application | the manufacturer's write action |
 | `iberian.episode_labels` | the application | the analyst's write action, and the evaluation ground truth |
 | `iberian.agent_actions` | the application | one row per tool call, append only |
@@ -827,7 +828,10 @@ call and points at the query above.
 
 ### Bringing the changes back into Delta
 
-`pipelines/01g_build_application_activity.py`, by hand.
+`pipelines/01g_build_application_activity.py`, the only task of the
+`iberian-activity` Job, fired by a table update trigger on the three
+`lb_*_history` tables. See [iberian-activity](#iberian-activity-on-data). Run it
+from a notebook only to debug it.
 
 It discovers every `lb_*_history` table by name, so a new application table
 configured tomorrow appears without anybody editing the notebook. For each one
@@ -841,7 +845,10 @@ The watermark version is incremental without depending on a checkpoint being
 intact, which for a notebook run by hand is the better property anyway.
 
 Set the `reread` widget to `yes` to ignore the watermark and re-merge
-everything. The merge is keyed, so that is safe and only costs time.
+everything. The merge is keyed, so that is safe and only costs time. The Job
+passes `no`, always: a full re-read is something you ask for when you think the
+watermark is wrong, not something that should happen because somebody saved an
+alert.
 
 ### Reaching Lakebase from outside Databricks
 
@@ -1025,14 +1032,18 @@ episodes had something to exclude, which is what makes the zero mean something.
 
 ---
 
-## The daily Job
+## The two Jobs
 
-`iberian-daily` runs five tasks at 16:00 Europe/Lisbon, which leaves margin
-after the Iberian day-ahead results are published in the early afternoon.
+There are two Jobs, and the difference between them is what triggers them.
+
+### iberian-daily, on a clock
+
+Six tasks at 16:00 Europe/Lisbon, which leaves margin after the Iberian
+day-ahead results are published in the early afternoon.
 
 ```
 ingest ──┬── load_notices
-         └── transform ── explain ── publish
+         └── transform ── explain ── publish ── sync_lakebase
 ```
 
 `load_notices` runs after `ingest` rather than beside it, so two tasks are not
@@ -1049,8 +1060,12 @@ frozen at the commit the run started from, so a file this task committed would
 be invisible to `publish` in the same run. The Volume is where the tasks of this
 Job already hand things to each other.
 
-`04_sync_episodes_to_lakebase` is **not** in the Job yet and is run by hand
-after it. So are `01c`, `01d`, `01e`, `01f` and `01g`.
+`sync_lakebase` is last and sits after `publish` rather than beside it. The
+dashboard is what a visitor lands on and it must not wait on a database; the
+workbench seeing today's episodes a minute later is not a problem anybody has.
+
+`01c`, `01d`, `01e` and `01f` stay manual, and that is the right place for them:
+they are backfills of history, not daily derivations.
 
 Retries differ per task and the reasons are in the YAML. `ingest` and
 `load_notices` retry twice five minutes apart, because a public API refusing a
@@ -1059,16 +1074,78 @@ attempt costs model calls and a partial run has already written what it
 produced, so tomorrow's run finishes the job for free. `publish` retries once,
 because the write reads the file's current sha first.
 
-The definition lives in `resources/iberian_job.yml` and is deployed with the
-Asset Bundle. It was originally built by clicking, which is fine for finding out
+### iberian-activity, on data
+
+One task, `01g_build_application_activity`, and **no schedule**. It fires on a
+table update trigger over the three `lb_*_history` tables.
+
+```yaml
+trigger:
+  table_update:
+    table_names:
+      - ${var.catalog}.${var.schema}.lb_alerts_history
+      - ${var.catalog}.${var.schema}.lb_episode_labels_history
+      - ${var.catalog}.${var.schema}.lb_agent_actions_history
+    condition: ANY_UPDATED
+    min_time_between_triggers_seconds: 300
+    wait_after_last_change_seconds: 120
+```
+
+Somebody saves a label in the workbench. The row lands in Lakebase, the change
+data feed writes it into `lb_episode_labels_history` within about fifteen
+seconds, that write is a Unity Catalog commit, and the commit fires this Job.
+Nobody runs anything.
+
+Three settings and the reason for each:
+
+**`ANY_UPDATED` rather than `ALL_UPDATED`.** Somebody who only labels episodes
+touches `lb_episode_labels_history` and `lb_agent_actions_history` and never
+`lb_alerts_history`. With `ALL_UPDATED` that whole session would go uncounted.
+
+**`wait_after_last_change_seconds: 120`.** A person working through a batch of
+episodes produces a write every few seconds and each one is a commit. The quiet
+period collapses a sitting into one run.
+
+**`min_time_between_triggers_seconds: 300`.** The backstop for a steady trickle
+of writes that never goes quiet.
+
+An earlier version of this project ran `01g` by hand, and that was wrong for a
+reason worth writing down. An analytics pipeline that only produces numbers when
+a human remembers to produce them is a report. The claim this architecture makes
+is that using the product generates the data that measures the product, and a
+manual step in the middle of that sentence makes it false.
+
+**Confirm it actually fires.** Table update triggers are documented for Unity
+Catalog Delta tables, and these are Unity Catalog Delta tables, but the
+documentation does not say either way whether a commit written by the Lakebase
+change feed service rather than by a Databricks job is seen the same way. Save
+an alert in the workbench, wait three minutes, and look at the run history of
+`iberian-activity`. If nothing fires, swap the `trigger:` block for the
+`periodic:` one commented at the bottom of
+`resources/iberian_activity_job.yml`, which polls every five minutes. That is
+still automatic and still incremental, and the notebook exits early when the
+watermark finds no new rows, so a quiet day costs nothing either way.
+
+Both definitions live in `resources/` and are deployed with the Asset Bundle. It was originally built by clicking, which is fine for finding out
 what the settings are and wrong as the place to keep them, then bound to the
 existing job id so the run history survived.
 
 ```bash
 databricks bundle validate -t prod
-databricks bundle deploy -t prod
+databricks bundle deploy -t prod \
+  --var="lakebase_project=<your project>,lakebase_host=<your endpoint host>"
 databricks bundle run iberian_daily -t prod
+databricks bundle run iberian_activity -t prod   # forces a run, ignoring the trigger
 ```
+
+**`lakebase_project` and `lakebase_host` have empty defaults on purpose.** This
+repository is public, and a project name and an endpoint host are identifiers of
+somebody's workspace rather than settings. They are passed at deploy time and
+baked into the Job definition in the workspace, where they belong. Deploy
+without them and the sync task fails loudly with a message naming the widget to
+fill, rather than writing nothing and reporting success.
+
+Use the endpoint's own host, never the `-pooler` host.
 
 Change the Job in the YAML, not in the interface. A bundle deployed Job is
 marked as managed by the bundle and the workspace restricts editing it there;

@@ -59,6 +59,22 @@ variables:
       owner/repo for the publish task's contents API call. Not derived from
       git_source, because that is a URL and this is not.
     default: doriel/iberian-energy
+  lakebase_project:
+    description: >-
+      Lakebase project the application database lives in. Deliberately empty
+      here: this repository is public and a project name is an identifier of
+      somebody's workspace, not a setting. Pass it at deploy time,
+      `--var="lakebase_project=..."`, and it is baked into the Job definition in
+      the workspace where it belongs. A blank value fails the sync task loudly,
+      with a message saying which widget to fill, rather than writing nothing
+      and reporting success.
+    default: ""
+  lakebase_host:
+    description: >-
+      The Lakebase endpoint's own host. Empty for the same reason as above.
+      Never the `-pooler` host: it fails with `SASL authentication failed`
+      against a generated database credential.
+    default: ""
 
 include:
   - resources/*.yml

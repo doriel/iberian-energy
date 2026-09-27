@@ -1,5 +1,5 @@
 ---
-title: What runs on a schedule, and what a person runs by hand
+title: Two Jobs, two kinds of trigger, and what is left to a person
 config:
   flowchart:
     wrappingWidth: 400
@@ -8,7 +8,7 @@ config:
     padding: 12
 ---
 flowchart TB
-  subgraph job["The Job · five tasks, deployed by Databricks Asset Bundles from the Git branch"]
+  subgraph job["iberian-daily · six tasks, on a clock, because the market is on a clock"]
     direction TB
     cron(["<b>iberian-daily</b><br/>16:00 Europe/Lisbon, after the day-ahead results<br/>max_concurrent_runs 1 · failure email only"])
     ingest["<b>ingest</b><br/>01_build_medallion<br/>lands three trailing days in the Volume<br/>same Volume 01f backfills into<br/>2 retries, 5 min apart"]
@@ -16,33 +16,52 @@ flowchart TB
     transform["<b>transform</b><br/>Lakeflow declarative pipeline<br/>bronze, silver, gold<br/>never full_refresh on a schedule"]
     explain["<b>explain</b><br/>02_explain_episodes<br/>max_new 25 · notice_retrieval direct<br/>0 retries, a partial run already wrote"]
     publish["<b>publish</b><br/>03_publish_dashboard<br/>commits data.json to the repo<br/>1 retry, reads the sha first"]
+    sync["<b>sync_lakebase</b><br/>04_sync_episodes_to_lakebase<br/>upsert into iberian.episodes<br/>after publish, so the dashboard never waits on a database"]
 
     cron --> ingest
     ingest --> notices
     ingest --> transform
     transform --> explain
     explain --> publish
+    publish --> sync
   end
 
-  subgraph manual["Run by hand · one off or occasional"]
+  subgraph activity["iberian-activity · one task, on data, because usage is not on a clock"]
+    direction TB
+    people(["<b>somebody uses the workbench</b><br/>labels an episode · saves an alert · asks the agent"])
+    pg["<b>Lakebase</b><br/>alerts · episode_labels · agent_actions"]
+    cdf["<b>change data feed</b><br/>off the write ahead log<br/>flushed about every 15s"]
+    trig(["<b>table update trigger</b><br/>ANY_UPDATED over the three lb_*_history tables<br/>120s quiet period · 300s floor between runs"])
+    build["<b>application_activity</b><br/>01g_build_application_activity<br/>watermark per source, keyed MERGE<br/>2 retries, safe because the merge is keyed"]
+
+    people --> pg
+    pg --> cdf
+    cdf --> trig
+    trig --> build
+  end
+
+  subgraph manual["Run by hand · genuinely occasional, and nothing downstream waits on them"]
     direction TB
     setup["<b>00</b> notice index · <b>00b</b> Lakebase schema<br/><b>00c</b> service principal grants · <b>00d</b> change data feed<br/>run once, idempotent"]
-    gen["<b>01c</b> ingest generation · <b>01d</b> silver per unit<br/><b>01e</b> gold_unit_hourly_output"]
+    gen["<b>01c</b> ingest generation · <b>01d</b> silver per unit<br/><b>01e</b> gold_unit_hourly_output<br/>a year of history, not a daily derivation"]
     backfill["<b>01f_backfill_market_history</b><br/>chunked and resumable, you say how many days"]
-    sync["<b>04_sync_episodes_to_lakebase</b><br/>upsert into iberian.episodes<br/>after the Job has rebuilt gold"]
-    activity["<b>01g_build_application_activity</b><br/>reads lb_*_history, MERGE on a watermark"]
-    evaluate["<b>99_evaluate_retrieval</b><br/>direct against vector, point in time honest"]
+    evaluate["<b>99_evaluate_retrieval</b><br/>direct against vector, and the leak measured<br/>a measurement, run when it is worth measuring"]
 
-    setup ~~~ gen ~~~ backfill
-    sync ~~~ activity ~~~ evaluate
+    setup ~~~ gen
+    backfill ~~~ evaluate
   end
 
   classDef task fill:#eef4fb,stroke:#3b6ea5,stroke-width:1.5px,color:#111
   classDef hand fill:#fdf3e7,stroke:#b5761f,stroke-width:1.5px,color:#111
   classDef trigger fill:#eefaf1,stroke:#2f8a54,stroke-width:1.5px,color:#111
-  class ingest,notices,transform,explain,publish task
-  class setup,gen,backfill,sync,activity,evaluate hand
-  class cron trigger
+  classDef pgnode fill:#fdf3e7,stroke:#b5761f,stroke-width:1.5px,color:#111
+  classDef cdfnode fill:#f6eefb,stroke:#7c4d9e,stroke-width:1.5px,color:#111
+  class ingest,notices,transform,explain,publish,sync,build task
+  class setup,gen,backfill,evaluate hand
+  class cron,trig,people trigger
+  class pg pgnode
+  class cdf cdfnode
 
   style job fill:#fbfdff,stroke:#c3d4e6,color:#1f3b57
+  style activity fill:#fbfffc,stroke:#c8e6d2,color:#1f5735
   style manual fill:#fffcf7,stroke:#e6d3b8,color:#6b4710

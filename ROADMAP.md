@@ -36,7 +36,8 @@ files, free text), not just in hostname.
 | Secrets | **done** | Every token in a scope, set into the environment at the notebook boundary, so the modules keep one authentication path across a laptop and the workspace. |
 | Foundation Model serving | **done** | Both agents query a serving endpoint through the SDK, with the endpoint as an argument so models can be compared. |
 | Incremental ingestion | **done** | Auto Loader reads only unseen files. Republished documents are resolved by publication time. |
-| Scheduled Job | **done** | `iberian-daily`, five tasks, 16:00 Europe/Lisbon: `ingest`, `load_notices`, `transform`, `explain`, `publish`. Retries differ per task and the reasons are in the YAML. |
+| Scheduled Job | **done** | `iberian-daily`, six tasks, 16:00 Europe/Lisbon: `ingest`, `load_notices`, `transform`, `explain`, `publish`, `sync_lakebase`. Retries differ per task and the reasons are in the YAML. |
+| Event driven Job | **done** | `iberian-activity`, one task, **no schedule**. A table update trigger over the three `lb_*_history` tables, `ANY_UPDATED`, with a 120s quiet period and a 300s floor. A write in the application is what runs it. |
 | Historical backfill | **done** | `01f_backfill_market_history`, chunked, resumable, separate from the daily Job on purpose. 365 days landed: 499 files, 65 MB, about 12 minutes. |
 | Explanation generation in the Job | **done** | `02_explain_episodes`. What makes the north star's "within fifteen minutes of publication" a property of the system rather than of somebody being at a laptop. Incremental, capped at 25 per run. |
 | Agent output as a table | **done** | `gold_episode_explanations`, written by the explain task. The pipeline runs before the explanations exist, so a pipeline-owned copy would always be a day behind. The JSONL in the Volume stays the record of work and the table is overwritten from it on every run. |
@@ -44,7 +45,7 @@ files, free text), not just in hostname.
 | Web service on Render | **done** | The dashboard at `/`, the workbench at `/workbench`, and the Databricks authorization code flow at `/auth`. |
 | **Lakebase** | **done** | Four application tables applied from `sql/001_application_tables.sql`, a service principal with its own Postgres role and grants, and `04_sync_episodes_to_lakebase` copying gold into `iberian.episodes`. Credentials are generated per connection because they last sixty minutes. |
 | **Lakebase change data feed** | **done** | `00d_enable_lakebase_cdf`. Schema level, immutable once created, off the write ahead log, flushed about every fifteen seconds into `lb_*_history` tables in Delta. Public Preview at the time of writing. |
-| **Application activity back into Delta** | **done** | `01g_build_application_activity` reads every `lb_*_history` table by name, merges on a watermark, and builds `silver_application_events` and `gold_application_activity`. |
+| **Application activity back into Delta** | **done, and automatic** | `01g_build_application_activity` reads every `lb_*_history` table by name, merges on a watermark, and builds `silver_application_events` and `gold_application_activity`. It is the only task of `iberian-activity` and nobody runs it: the change feed commit is the trigger. |
 | **An agent that acts** | **done** | `src/iberian/app/assistant.py`, seven tools, three of which write. Every call is recorded in `iberian.agent_actions` with `ok`, `rejected` and `error` kept apart. Validation is in the tool, not the prompt. |
 | Databricks Vector Search | **done** | `gold_transmission_notices_index`, Delta Sync with managed `databricks-gte-large-en` embeddings. `notice_retrieval` chooses `direct` or `vector`; production uses `direct` and `99_evaluate_retrieval` measures the other against it. |
 | Mosaic AI Agent Framework | **done, not deployed** | `agents/mibel_agent.py` is an MLflow `ResponsesAgent`, registered in Unity Catalog as `bootcamp_students.doriel.mibel_agent`. The library is packaged with it, and that is checked rather than assumed: the registered version is loaded in a separate process outside the repository, and `iberian` has to import from the model's own `code/` directory. Serving it behind an endpoint was left out on purpose; the daily Job calls the same code directly. |
@@ -526,9 +527,13 @@ Things that are known to be unresolved, kept here rather than left implicit.
   which would split an episode running past local midnight in two. At this size
   the constant key costs nothing, but the limitation should be understood before
   changing it.
-- `04_sync_episodes_to_lakebase` and `01g_build_application_activity` are run by
-  hand rather than being tasks of the daily Job. Nothing prevents adding them;
-  it was not done.
+- **Whether a table update trigger fires on a commit written by the Lakebase
+  change feed service** rather than by a Databricks job. The trigger is
+  documented for Unity Catalog Delta tables and these are Unity Catalog Delta
+  tables, so it should, but the documentation does not address an external
+  writer and it has to be confirmed by watching the run history rather than
+  assumed. A `periodic` trigger every five minutes is the fallback and is
+  commented in `resources/iberian_activity_job.yml`.
 
 ## What is left
 
@@ -539,7 +544,8 @@ end to end. What remains is evidence and presentation, not infrastructure.
 
 1. **Label 20 to 25 episodes in the workbench**, so the change data feed carries
    real rows rather than test ones and `gold_application_activity` has something
-   to aggregate.
+   to aggregate. Confirm `iberian-activity` fired on its own rather than needing
+   a hand.
 2. ~~Run `99_evaluate_retrieval`.~~ **Done**, 27 September. 375 of 377
    agreement, 0 leaked with the filter, 1,151 without it.
 3. **The presentation.**
@@ -576,7 +582,8 @@ end to end. What remains is evidence and presentation, not infrastructure.
   nothing will be reading it.
 - Moving the declarative pipeline into the Asset Bundle. It lives in the
   workspace and is referenced by id, which `databricks.yml` already notes as the
-  obvious next step.
+  obvious next step. It is the last piece of infrastructure that exists because
+  somebody clicked.
 
 ## Future improvements
 
@@ -592,6 +599,8 @@ infrastructure that exists because somebody clicked.
 **A shared session store.** The workbench keeps its session state and its budget
 counters in process memory, which is correct for one instance and wrong for two.
 Lakebase is already there and is where they would go.
+
+**The declarative pipeline in the bundle**, still. It is referenced by id.
 
 **Point in time correctness as a test rather than a measurement.**
 `99_evaluate_retrieval` measures the leak on real data. A synthetic fixture with

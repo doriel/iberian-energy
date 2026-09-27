@@ -173,6 +173,33 @@ resources:
           min_retry_interval_millis: 60000
           timeout_seconds: 900
 
+        - task_key: sync_lakebase
+          depends_on:
+            - task_key: publish
+          notebook_task:
+            notebook_path: pipelines/04_sync_episodes_to_lakebase
+            source: GIT
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              project: ${var.lakebase_project}
+              host: ${var.lakebase_host}
+          environment_key: Default
+
+          # Last, and after publish rather than beside it. The dashboard is the
+          # thing a visitor lands on and it must not wait on a database; the
+          # workbench seeing today's episodes a minute later than the dashboard
+          # is not a problem anybody has.
+          #
+          # This was run by hand until the analytics were automated, which made
+          # the workbench quietly a day behind whenever the hand forgot.
+          #
+          # Safe to retry: the write is an upsert keyed on episode_key.
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+          timeout_seconds: 900
+
       environments:
         - environment_key: Default
           spec:

@@ -91,13 +91,21 @@ measures the leak by running the same retrieval with the filter and without it.
 
 ![Orchestration](images_readme/03-orchestration.png)
 
-One Job, five tasks, 16:00 Europe/Lisbon, which leaves margin after the Iberian
-day-ahead results are published in the early afternoon. The rest are notebooks
-run by hand: one time setup, the generation backfill, the market history
-backfill, the Lakebase sync, the application activity build and the retrieval
-evaluation.
+**Two Jobs, and they are triggered by different kinds of thing.**
 
-Two things in that picture are decisions rather than plumbing.
+`iberian-daily` runs six tasks at 16:00 Europe/Lisbon, which leaves margin after
+the Iberian day-ahead results are published in the early afternoon. It runs on a
+clock because the market publishes on a clock.
+
+`iberian-activity` has one task and **no schedule at all**. It fires on a table
+update trigger over the three `lb_*_history` tables, so a person labelling
+episodes on a Tuesday evening sees the analytics catch up on a Tuesday evening,
+and a day where nobody touched the application costs nothing.
+
+What is left to a person is genuinely occasional and nothing downstream waits on
+it: the one time setup, the two backfills, and the retrieval evaluation.
+
+Three things in that picture are decisions rather than plumbing.
 
 **The Job writes to GitHub rather than to a server.** A Databricks Job has no
 git checkout and no ssh key, but it can make one authenticated HTTP request. The
@@ -108,6 +116,12 @@ committed and nothing rebuilds.
 **The explanations cross between tasks through the Volume, not the repository.**
 Within one run the Git checkout is frozen at the commit the run started from, so
 a file `explain` committed would be invisible to `publish` in the same run.
+
+**The analytics are triggered by the data, not by a schedule and not by a
+person.** An analytics pipeline that only produces numbers when somebody
+remembers to produce them is a report, not a pipeline. The whole claim of this
+architecture is that using the product generates the data that measures the
+product, and a manual step in the middle of that sentence makes it false.
 
 ## Why the code is shaped this way
 
@@ -180,10 +194,10 @@ pipelines/
   01d_build_generation_silver.py by hand: silver_generation_per_unit
   01e_build_generation_gold.py   by hand: gold_unit_hourly_output, with baselines
   01f_backfill_market_history.py by hand: N days of market history, resumable
-  01g_build_application_activity.py  by hand: lb_*_history -> silver -> gold
+  01g_build_application_activity.py  activity Job: lb_*_history -> silver -> gold
   02_explain_episodes.py         explain task: new episodes to the Volume
   03_publish_dashboard.py        publish task: gold -> JSON -> a commit
-  04_sync_episodes_to_lakebase.py  gold_split_episodes -> iberian.episodes
+  04_sync_episodes_to_lakebase.py  sync task: gold_split_episodes -> iberian.episodes
   99_evaluate_retrieval.py       direct against vector, and the leak measured
   transformations/               the Lakeflow declarative pipeline
 app/
@@ -197,7 +211,8 @@ sql/
   002_service_principal_grants.sql  what the application's role may do
 images_readme/                   the figures above, with their editable sources
 databricks.yml                   the Asset Bundle: variables and targets
-resources/iberian_job.yml        the daily Job, five tasks, versioned
+resources/iberian_job.yml        the daily Job, six tasks, versioned
+resources/iberian_activity_job.yml  the activity Job, triggered by table update
 .github/workflows/ci.yml         tests and configuration checks on every push
 scripts/                         local entry points, see GUIDE.md
 tests/                           synthetic data, no network, no credentials

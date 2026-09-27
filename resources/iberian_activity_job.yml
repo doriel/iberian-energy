@@ -1,0 +1,122 @@
+# The analytics half, and the reason it is a second Job rather than a task of
+# the first one.
+#
+# `iberian-daily` runs on a clock because the market publishes on a clock. This
+# one has nothing to do with the market: it runs when somebody used the
+# application. A person labelling six episodes on a Tuesday evening should see
+# the analytics catch up on a Tuesday evening, not the following afternoon, and
+# a day where nobody touched it should cost nothing at all.
+#
+# So the trigger is the data itself. The Lakebase change data feed writes
+# `lb_*_history` into Delta within about fifteen seconds of a write in the
+# application, that write is a Unity Catalog commit, and a table update trigger
+# fires on the commit.
+#
+# An earlier version of this project ran `01g` by hand, which was wrong for a
+# reason worth writing down: an analytics pipeline that only produces numbers
+# when a human remembers to produce them is not an analytics pipeline, it is a
+# report. The whole claim of this architecture is that using the product
+# generates the data that measures the product, and a manual step in the middle
+# of that sentence makes it false.
+
+resources:
+  jobs:
+    iberian_activity:
+      name: iberian-activity
+
+      email_notifications:
+        on_failure:
+          - doriel3572@gmail.com
+
+      # Fires when any of the three change feed tables gets a new commit.
+      #
+      # ANY_UPDATED rather than ALL_UPDATED, and the difference matters here.
+      # Somebody who only labels episodes touches `lb_episode_labels_history`
+      # and `lb_agent_actions_history` but never `lb_alerts_history`, and with
+      # ALL_UPDATED that session would never be counted.
+      #
+      # `wait_after_last_change_seconds: 120` is the quiet period. A person
+      # working through a batch of episodes produces a write every few seconds,
+      # and each one is a commit. Without it this Job would start on the first
+      # label and again on the second. Two minutes of quiet means one run for
+      # the whole sitting, which is also why `max_concurrent_runs` stays at 1.
+      #
+      # `min_time_between_triggers_seconds: 300` is the floor. It is the
+      # backstop against a pathological case the quiet period does not cover:
+      # a steady trickle of writes that never goes quiet.
+      trigger:
+        table_update:
+          table_names:
+            - ${var.catalog}.${var.schema}.lb_alerts_history
+            - ${var.catalog}.${var.schema}.lb_episode_labels_history
+            - ${var.catalog}.${var.schema}.lb_agent_actions_history
+          condition: ANY_UPDATED
+          min_time_between_triggers_seconds: 300
+          wait_after_last_change_seconds: 120
+        pause_status: UNPAUSED
+
+      # One at a time. Two runs merging the same change feed rows would both
+      # succeed, because the MERGE is keyed, and would both be a waste.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      git_source:
+        git_url: https://github.com/doriel/iberian-energy
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      tasks:
+        - task_key: application_activity
+          notebook_task:
+            notebook_path: pipelines/01g_build_application_activity
+            source: GIT
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              # Never `yes` on a trigger. A full re-read is a thing you ask for
+              # when the watermark is wrong, not something that happens because
+              # somebody saved an alert.
+              reread: "no"
+          environment_key: Default
+
+          # Safe to retry: the merge is keyed on
+          # (source_table, pg_lsn, sort_by, change_type), so a second attempt
+          # either does the same work or finds it already done.
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+
+          # It reads a handful of new rows and rewrites a small aggregate. If it
+          # is still going after ten minutes, something is wrong rather than
+          # slow.
+          timeout_seconds: 600
+
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+
+      performance_target: PERFORMANCE_OPTIMIZED
+
+# ---------------------------------------------------------------------------
+# If the table update trigger does not fire
+# ---------------------------------------------------------------------------
+#
+# Table update triggers are documented for Unity Catalog Delta tables, and the
+# `lb_*_history` tables are Unity Catalog Delta tables. What the documentation
+# does not say either way is whether a commit written by the Lakebase change
+# feed service, rather than by a Databricks job, is seen the same way. It should
+# be, since a commit is a commit, but it has to be confirmed by watching the run
+# history after a write in the application rather than assumed.
+#
+# If it turns out not to fire, replace the `trigger:` block above with the one
+# below and nothing else changes. A five minute poll is still automatic, still
+# incremental, and still costs nothing on a day with no activity, because the
+# notebook exits early when the watermark finds no new rows.
+#
+#     trigger:
+#       periodic:
+#         interval: 5
+#         unit: MINUTES
+#       pause_status: UNPAUSED
