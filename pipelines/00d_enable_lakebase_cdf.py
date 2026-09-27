@@ -366,11 +366,28 @@ import time  # noqa: E402
 
 time.sleep(5)
 
-statuses = list(w.postgres.list_cdf_statuses(parent=DATABASE_PARENT))
+try:
+    statuses = list(w.postgres.list_cdf_statuses(parent=DATABASE_PARENT))
+except NotFound as exc:
+    # "No API found for GET .../cdf-statuses" is not a missing resource, it is
+    # a missing route: the SDK carries the method and this workspace's control
+    # plane does not serve it yet. The feature is Public Preview and its
+    # surfaces are arriving in pieces; `cdf-configs` answered on the same
+    # parent a few cells up.
+    #
+    # Measured on 27 September 2026. Worth re-testing before submission, since
+    # this is exactly the kind of thing that changes in a week.
+    statuses = []
+    print(f"  the statuses endpoint is not served by this workspace yet:\n  {exc}\n")
+    print("  Read the state in the Lakebase SQL editor instead:")
+    print("      SELECT * FROM wal2delta.tables;")
+    print("  It reports per table whether the feed is SNAPSHOTTING or")
+    print("  STREAMING, the committed LSN and the last write time.")
+    print("\n  The probe below is the better evidence anyway: a row written in")
+    print("  Postgres and read back out of Delta proves the path end to end,")
+    print("  which a status field only asserts.")
 
-if not statuses:
-    print("No statuses yet. Give it a few seconds and run this cell again.")
-else:
+if statuses:
     print(f"{'postgres table':<34} {'state':<22} {'unity catalog table'}")
     print("-" * 100)
     for status in sorted(statuses, key=lambda s: s.postgres_table or ""):
@@ -459,5 +476,9 @@ except Exception as exc:
 
 # COMMAND ----------
 
-message = f"{len(statuses)} table(s) in the feed" if statuses else "no statuses yet"
+message = (
+    f"{len(statuses)} table(s) in the feed"
+    if statuses
+    else "configured; statuses endpoint not served here, see wal2delta.tables"
+)
 dbutils.notebook.exit(message)
