@@ -47,7 +47,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install databricks-sdk --upgrade
+# MAGIC %pip install databricks-sdk --upgrade "psycopg[binary]"
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -139,7 +139,14 @@ print(f"type           {catalog_info.catalog_type}")
 print(f"storage root   {catalog_info.storage_root or '(metastore default)'}")
 print(f"storage loc    {catalog_info.storage_location or '(none)'}")
 
-if not catalog_info.storage_root:
+if catalog_info.storage_root:
+    print(
+        "\n  The catalog has a storage root of its own rather than the "
+        "metastore default, which is what the documentation asks for. Measured "
+        "on 27 September 2026 for bootcamp_students: a MANAGED_CATALOG with an "
+        "S3 root. That is the check that could have ended this, and it passed."
+    )
+else:
     print(
         "\n  No explicit storage root. The documentation lists an externally "
         "located catalog as a requirement, so the create below may be refused.\n"
