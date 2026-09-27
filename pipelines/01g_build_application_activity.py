@@ -18,16 +18,28 @@
 # MAGIC Worth being precise, because "incremental" is claimed more often than it
 # MAGIC is true.
 # MAGIC
-# MAGIC **The feed is read incrementally.** One streaming query per history
-# MAGIC table, each with its own checkpoint, each triggered `availableNow` so it
-# MAGIC processes what has arrived and stops. A run reads the rows written since
-# MAGIC the last run and no others. The history tables are append-only by
-# MAGIC construction, so there is nothing to re-scan and nothing to miss.
+# MAGIC **The feed is read incrementally, by high-water mark.** Each history
+# MAGIC table is append-only and carries `_sort_by`, a key the feed guarantees to
+# MAGIC be monotonic. A run reads the rows above the highest `sort_by` already in
+# MAGIC silver for that source and no others.
 # MAGIC
-# MAGIC **The write into silver is idempotent.** `foreachBatch` merges on
-# MAGIC `(source_table, pg_lsn, sort_by, change_type)`, which is unique per
-# MAGIC change. A checkpoint lost and rebuilt replays rows and produces no
-# MAGIC duplicates, which a plain append would not.
+# MAGIC The first version of this used a streaming query per table with
+# MAGIC `foreachBatch` and a checkpoint, which is what the Databricks
+# MAGIC documentation shows. It killed the Spark Connect session on serverless
+# MAGIC compute: `INTERNAL_ERROR: Spark session is no longer usable`, on the
+# MAGIC first table, taking the other two with it. Rather than fight that, the
+# MAGIC state moved from a checkpoint directory into the target table itself.
+# MAGIC
+# MAGIC That is not a downgrade. A watermark stored in the table is visible to
+# MAGIC anyone who queries it, survives a workspace that loses a Volume, and
+# MAGIC needs no explanation of where the position is kept. The streaming version
+# MAGIC bought automatic state management for state that is one number.
+# MAGIC
+# MAGIC **The write into silver is idempotent.** The merge is keyed on
+# MAGIC `(source_table, pg_lsn, sort_by, change_type)`, which identifies one
+# MAGIC change: an LSN and a sort key name one row in the write-ahead log, and
+# MAGIC the change type separates the two halves of an update. A run interrupted
+# MAGIC halfway and started again inserts nothing twice.
 # MAGIC
 # MAGIC **The gold aggregate is recomputed in full, and that is deliberate.**
 # MAGIC Silver holds a few thousand rows. An additive merge over a grain that
@@ -47,22 +59,20 @@
 
 dbutils.widgets.text("catalog", "bootcamp_students", "Catalog")
 dbutils.widgets.text("schema", "doriel", "Schema")
-dbutils.widgets.text("volume", "raw", "Volume for the checkpoints")
-dbutils.widgets.dropdown("reset", "no", ["no", "yes"], "Forget the checkpoints")
+dbutils.widgets.dropdown("reread", "no", ["no", "yes"], "Ignore the watermark")
 
 CATALOG = dbutils.widgets.get("catalog").strip()
 SCHEMA = dbutils.widgets.get("schema").strip()
-VOLUME = dbutils.widgets.get("volume").strip()
-RESET = dbutils.widgets.get("reset") == "yes"
+REREAD = dbutils.widgets.get("reread") == "yes"
 
 EVENTS = f"{CATALOG}.{SCHEMA}.silver_application_events"
 ACTIVITY = f"{CATALOG}.{SCHEMA}.gold_application_activity"
-CHECKPOINTS = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}/_checkpoints/application_activity"
 
-print(f"{EVENTS}\n{ACTIVITY}\ncheckpoints under {CHECKPOINTS}")
-if RESET:
-    print("\nreset: the checkpoints will be dropped and every history row re-read.")
-    print("Safe, because the merge into silver is keyed on the change itself.")
+print(f"{EVENTS}\n{ACTIVITY}")
+if REREAD:
+    print("\nreread: every history row is read again, watermark ignored.")
+    print("Safe, because the merge is keyed on the change itself and inserts")
+    print("nothing that is already there.")
 
 # COMMAND ----------
 
@@ -184,73 +194,67 @@ print(f"{EVENTS} ready")
 
 # COMMAND ----------
 
-if RESET:
-    try:
-        dbutils.fs.rm(CHECKPOINTS, recurse=True)
-        print(f"removed {CHECKPOINTS}")
-    except Exception as exc:
-        print(f"nothing to remove: {exc}")
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC ## Read the feed
 # MAGIC
-# MAGIC One query per history table so a table that fails does not stop the
-# MAGIC others, and so each keeps its own position. `availableNow` makes this a
-# MAGIC batch that happens to be built out of a stream: it consumes what has
-# MAGIC arrived and stops, which is what a Job task needs and what a continuous
-# MAGIC query is not.
+# MAGIC One pass per history table, each starting above the highest `sort_by`
+# MAGIC already in silver for that source. A table that fails is reported and
+# MAGIC skipped rather than taking the others with it: a table still
+# MAGIC snapshotting is the ordinary case and not a reason to lose the run.
 
 # COMMAND ----------
 
-from delta.tables import DeltaTable  # noqa: E402
 
-#: The change itself is the key. An LSN and a sort key identify one row in the
-#: write-ahead log, and the change type distinguishes the two halves of an
-#: update, which share everything else.
-MERGE_ON = (
-    "target.source_table = source.source_table AND "
-    "target.pg_lsn = source.pg_lsn AND "
-    "target.sort_by = source.sort_by AND "
-    "target.change_type = source.change_type"
-)
+def watermark(source: str) -> int:
+    """The highest change already recorded for one source, or -1 for none.
+
+    Read from the target table rather than from a checkpoint. The position is
+    then a column somebody can query, which is worth more than the automatic
+    state management it replaces.
+    """
+    found = spark.sql(
+        f"SELECT max(sort_by) AS high FROM {EVENTS} WHERE source_table = '{source}'"
+    ).collect()
+    high = found[0]["high"] if found else None
+    return -1 if high is None else int(high)
 
 
-def upsert(batch, _batch_id: int) -> None:
-    """Merge one micro-batch into silver. Idempotent by construction."""
-    if batch.isEmpty():
-        return
-    (
-        DeltaTable.forName(batch.sparkSession, EVENTS)
-        .alias("target")
-        .merge(batch.alias("source"), MERGE_ON)
-        .whenNotMatchedInsertAll()
-        .execute()
-    )
-
+#: Keyed on the change itself. An LSN and a sort key name one row in the
+#: write-ahead log; the change type separates the two halves of an update,
+#: which share everything else.
+MERGE = f"""
+MERGE INTO {EVENTS} AS target
+USING incoming_events AS source
+   ON target.source_table = source.source_table
+  AND target.pg_lsn      = source.pg_lsn
+  AND target.sort_by     = source.sort_by
+  AND target.change_type = source.change_type
+WHEN NOT MATCHED THEN INSERT *
+"""
 
 processed = {}
 failures = {}
 
 for table_name in sorted(history):
+    source = table_name[len("lb_"):-len("_history")]
     full = f"{CATALOG}.{SCHEMA}.{table_name}"
     try:
-        frame = spark.readStream.table(full)
-        query = (
-            normalise(frame, table_name)
-            .writeStream.foreachBatch(upsert)
-            .option("checkpointLocation", f"{CHECKPOINTS}/{table_name}")
-            .trigger(availableNow=True)
-            .start()
-        )
-        query.awaitTermination()
-        progress = query.lastProgress or {}
-        processed[table_name] = int(progress.get("numInputRows", 0))
-        print(f"  {table_name:<34} {processed[table_name]:>8,} new row(s)")
+        high = -1 if REREAD else watermark(source)
+        frame = spark.table(full).filter(F.col("_sort_by") > F.lit(high))
+        incoming = normalise(frame, table_name)
+
+        found = incoming.count()
+        processed[table_name] = found
+        if found:
+            # A temporary view and a SQL MERGE rather than the DeltaTable
+            # Python API. Both work, and SQL is the one that behaves the same
+            # on every compute this might run on, which after the streaming
+            # attempt is a property worth paying a little verbosity for.
+            incoming.createOrReplaceTempView("incoming_events")
+            spark.sql(MERGE)
+
+        print(f"  {table_name:<34} from sort_by > {high:<14} {found:>8,} new row(s)")
     except Exception as exc:
-        # One table that cannot be read is worth reporting rather than losing
-        # the other three to. A table still snapshotting is the ordinary case.
         failures[table_name] = f"{type(exc).__name__}: {str(exc).splitlines()[0][:160]}"
         print(f"  {table_name:<34} FAILED, skipped")
 
@@ -265,6 +269,29 @@ print(f"{spark.table(EVENTS).count():,} event(s) in {EVENTS}")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Where each source stands
+# MAGIC
+# MAGIC The watermark, after the run. This is the whole of the incremental
+# MAGIC state, and it is four numbers in a table rather than a directory nobody
+# MAGIC can read.
+
+# COMMAND ----------
+
+(
+    spark.table(EVENTS)
+    .groupBy("source_table")
+    .agg(
+        F.count("*").alias("events"),
+        F.max("sort_by").alias("watermark"),
+        F.min("occurred_at").alias("first"),
+        F.max("occurred_at").alias("last"),
+    )
+    .orderBy("source_table")
+    .show(truncate=False)
+)
+
+# COMMAND ----------
+
 # MAGIC ## The gold table
 # MAGIC
 # MAGIC One row per day per source table per change type per tool per status.
