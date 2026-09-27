@@ -117,8 +117,21 @@ for branch in w.postgres.list_branches(parent=f"projects/{PROJECT}"):
     print(f"  {branch.name}")
 
 print(f"\ndatabases under {BRANCH_PARENT}:")
-for database in w.postgres.list_databases(parent=BRANCH_PARENT):
-    print(f"  {database.name}")
+databases = [d.name or "" for d in w.postgres.list_databases(parent=BRANCH_PARENT)]
+for name in databases:
+    print(f"  {name}")
+
+# Checked here rather than left to fail four cells down. A wrong database name
+# and a database with no change data feed configured produce the same
+# not-found from the list call, and telling them apart afterwards is guesswork.
+leaves = {name.rsplit("/", 1)[-1] for name in databases}
+if DATABASE not in leaves and DATABASE_PARENT not in databases:
+    raise ValueError(
+        f"No database named {DATABASE!r} under {BRANCH_PARENT}. "
+        f"The branch has {sorted(leaves)}. Put one of those in the database "
+        "widget."
+    )
+print(f"\n  {DATABASE!r} is there. parent for the feed:\n  {DATABASE_PARENT}")
 
 # COMMAND ----------
 
@@ -267,7 +280,17 @@ for row in rows:
 
 # COMMAND ----------
 
-existing = list(w.postgres.list_cdf_configs(parent=DATABASE_PARENT))
+from databricks.sdk.errors import NotFound  # noqa: E402
+
+try:
+    existing = list(w.postgres.list_cdf_configs(parent=DATABASE_PARENT))
+except NotFound as exc:
+    # The API answers "no configurations here" with a not-found rather than an
+    # empty list. Since it answers a parent that does not exist the same way,
+    # the database name is checked against the listing further up instead of
+    # being inferred from this.
+    print(f"  none configured yet ({type(exc).__name__})")
+    existing = []
 
 if existing:
     for config in existing:
