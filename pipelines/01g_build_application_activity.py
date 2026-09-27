@@ -292,6 +292,7 @@ print(f"{spark.table(EVENTS).count():,} event(s) in {EVENTS}")
 
 # COMMAND ----------
 
+# MAGIC %md
 # MAGIC ## The gold table
 # MAGIC
 # MAGIC One row per day per source table per change type per tool per status.
