@@ -33,8 +33,22 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install "psycopg[binary]" pandas
+# MAGIC %pip install "databricks-sdk>=0.89" "psycopg[binary]" pandas
 # MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC The SDK floor is the whole reason this cell is not just `psycopg`.
+# MAGIC `WorkspaceClient.postgres`, which is what generates the Lakebase
+# MAGIC credential, arrived in `databricks-sdk` 0.89.0. Serverless environment
+# MAGIC version 5 ships an older one, so without the pin this task fails with
+# MAGIC `AttributeError: 'WorkspaceClient' object has no attribute 'postgres'`
+# MAGIC on the first write and again, uncaught, on the read back.
+# MAGIC
+# MAGIC It ran green by hand and red in the Job, which is the usual shape of
+# MAGIC this mistake: the interactive session had a newer SDK than the Job
+# MAGIC environment, so the notebook was never really tested where it runs.
 
 # COMMAND ----------
 

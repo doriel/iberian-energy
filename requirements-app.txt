@@ -28,8 +28,12 @@ requests>=2.32
 psycopg[binary]>=3.2,<4.0
 
 # Credentials for Lakebase and for the serving endpoint. Pinned below the next
-# major because this one authenticates a running service.
-databricks-sdk>=0.60,<1.0
+# major because this one authenticates a running service, and above 0.89
+# because that is where WorkspaceClient.postgres appeared. The old floor of
+# 0.60 was a live hazard: a rebuild that resolved to it would have taken the
+# deployed application down the same way it took the Job down, an hour after
+# nobody was watching.
+databricks-sdk>=0.89,<1.0
 
 # Request bodies, arriving with FastAPI already.
 pydantic>=2.0,<3.0

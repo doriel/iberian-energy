@@ -13,7 +13,7 @@ pandas>=2.0
 # fresh clone without this fails at the first read_parquet rather than at import.
 pyarrow>=15.0
 requests>=2.32
-databricks-sdk>=0.30
+databricks-sdk>=0.89
 # scripts/check_bundle_paths.py reads the bundle definition. It was available
 # by accident as somebody else's transitive dependency, which is exactly the
 # kind of thing a clean CI environment is for finding.

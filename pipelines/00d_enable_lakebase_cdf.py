@@ -47,7 +47,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install databricks-sdk --upgrade "psycopg[binary]"
+# MAGIC %pip install "databricks-sdk>=0.89" "psycopg[binary]"
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
