@@ -136,6 +136,38 @@ def load_explanations(path: Path) -> dict[str, dict]:
     return out
 
 
+def explanation_stats(path: Path) -> dict:
+    """What the explanation layer actually did, counted rather than asserted.
+
+    The page used to carry a typed zero for invented numbers and the word
+    "Small" for the model. Both were true and neither was evidence: a figure
+    nobody computes cannot go wrong, and cannot go right either. These are read
+    off the same file the explanations themselves come from, so if the verifier
+    ever lets something through, the page says so without anybody editing it.
+    """
+    if not path.exists():
+        return {}
+    checked = published = retried = unsupported = 0
+    models: set[str] = set()
+    for line in path.open():
+        record = json.loads(line)
+        if not record.get("grounded") or not record.get("text"):
+            continue
+        published += 1
+        checked += int(record.get("numeric_claims") or 0)
+        unsupported += len(record.get("unsupported") or [])
+        if int(record.get("attempts") or 1) > 1:
+            retried += 1
+        if record.get("model"):
+            models.add(str(record["model"]))
+    return {
+        "figures_checked": checked,
+        "unsupported_published": unsupported,
+        "drafts_retried": retried,
+        "model": sorted(models)[0] if len(models) == 1 else ", ".join(sorted(models)),
+    }
+
+
 def load_labels(path: Path) -> dict[str, dict]:
     if not path.exists():
         return {}
@@ -190,6 +222,7 @@ def build(
     episodes = as_utc(episodes, "start_utc", "end_utc")
 
     explained = load_explanations(explanations)
+    explanation_counts = explanation_stats(explanations)
     labels = load_labels(evaluation / "episodes.csv")
 
     # --- the two validations ---------------------------------------------------
@@ -307,6 +340,8 @@ def build(
         headline["worst_price_difference"] = number(
             agreement[["pt_difference", "es_difference"]].max().max(), 4
         )
+    headline.update(explanation_counts)
+
     if not cost.empty:
         # Rent against rent. This used to compare the import cost, which counts
         # only the hours Portugal was buying, against REE's rent, which counts

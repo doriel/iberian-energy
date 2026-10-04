@@ -598,7 +598,7 @@ function renderTiles() {
     tile('Episodes found', eur(h.episodes),
          `over ${c.days} market days`),
     tile('Extra import cost', `€${eur(h.total_cost_eur)}`,
-         'premium on the energy actually imported'),
+         'premium on imports only, not the border rent below'),
     tile('Widest spread', `${eur(h.worst_spread, 2)} <span style="font-size:15px;color:var(--ink-2)">EUR/MWh</span>`,
          'Portugal above Spain, at its worst'),
     tile('Intervals priced apart', pct(h.decoupled_share, 1),
@@ -627,8 +627,11 @@ function renderTiles() {
 
   document.getElementById('check-agent').innerHTML = [
     tile('Episodes explained', eur(h.explained), 'each figure traced to a document'),
-    tile('Invented numbers', '0', 'across every explanation published here'),
-    tile('Model', 'Small', 'grounding does the work, not model size'),
+    tile('Figures checked', h.figures_checked == null ? '—' : eur(h.figures_checked),
+         `${h.unsupported_published ?? 0} not supported by the evidence`),
+    tile('Model', (h.model || '').replace(/^databricks-/, '') || '—',
+         h.drafts_retried ? `${h.drafts_retried} drafts rejected and rewritten`
+                          : 'grounding does the work, not model size'),
   ].join('');
 }
 
