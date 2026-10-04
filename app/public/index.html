@@ -628,7 +628,8 @@ function renderTiles() {
   document.getElementById('check-agent').innerHTML = [
     tile('Episodes explained', eur(h.explained), 'each figure traced to a document'),
     tile('Figures checked', h.figures_checked == null ? '—' : eur(h.figures_checked),
-         `${h.unsupported_published ?? 0} not supported by the evidence`),
+         h.figures_checked == null ? 'awaiting the next pipeline run'
+                                   : `${h.unsupported_published} not supported by the evidence`),
     tile('Model', (h.model || '').replace(/^databricks-/, '') || '—',
          h.drafts_retried ? `${h.drafts_retried} drafts rejected and rewritten`
                           : 'grounding does the work, not model size'),
