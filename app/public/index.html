@@ -357,9 +357,13 @@ footer a { color: var(--ink-2); }
     <h2>The cost figure, against the system operator</h2>
     <p class="sub">
       REE publishes the congestion rent earned on this border. This project
-      computes the premium Portugal paid on the energy actually imported. In
-      implicit market coupling the allocated capacity is the scheduled exchange,
-      so the two are the same quantity approached from opposite ends.
+      computes the same quantity from the other end, the absolute spread applied
+      to the energy that crossed the border in either direction, and the two are
+      compared per market day. Rent against rent, deliberately: an earlier
+      version of this check compared REE's rent to the premium Portugal paid on
+      imports alone. That agreed to 0.0015% over a summer window where the flow
+      never reversed, and diverged to 21% once a full year included days flowing
+      the other way.
     </p>
     <div class="tiles" id="check-cost"></div>
     <p class="caveat">
@@ -616,7 +620,7 @@ function renderTiles() {
   ].join('');
 
   document.getElementById('check-cost').innerHTML = [
-    tile('This project', `€${eur(h.total_cost_eur)}`, 'from ENTSO-E prices and schedules'),
+    tile('This project', h.our_rent_eur == null ? '—' : `€${eur(h.our_rent_eur)}`, 'congestion rent, from ENTSO-E prices and schedules'),
     tile('REE congestion rent', `€${eur(h.ree_rent_eur ?? 0)}`, 'published by the system operator'),
     tile('Difference', pct(h.cost_difference_pct ?? 0, 4), 'of the published total'),
   ].join('');
