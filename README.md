@@ -18,6 +18,33 @@ them is not, and almost nobody tracks it.
 - [ROADMAP.md](ROADMAP.md) is what is built, what is not, and what the numbers
   have been checked against.
 
+## What to look at
+
+The repository is long because the reasoning is in it rather than beside it.
+This is the index: each row is a question somebody has actually asked about this
+project, and where it is answered.
+
+| If you want to know | Go to |
+|---|---|
+| What market splitting is, and the thresholds the code uses | [The thing being measured](#the-thing-being-measured) |
+| Where the data comes from and how it reaches a gold table | [From published documents to the gold tables](#from-published-documents-to-the-gold-tables) |
+| How a click in the application becomes an analytics row | [The loop that makes it a product and not a report](#the-loop-that-makes-it-a-product-and-not-a-report) |
+| How the agent is stopped from inventing a number | [The explanation layer](#the-explanation-layer) |
+| What is scheduled, what triggers on data, and what is manual | [What runs when](#what-runs-when) |
+| Why pandas inside Spark, and why the tests need no cluster | [Why the code is shaped this way](#why-the-code-is-shaped-this-way) |
+| Which file holds what | [Layout](#layout) |
+| How to run it with no credentials at all | [Run it now, without credentials](#run-it-now-without-credentials) |
+| Whether the figures agree with the people who publish them | [What the numbers have been checked against](#what-the-numbers-have-been-checked-against) |
+| What was deliberately left out, and why | [What is not here](#what-is-not-here) |
+| The traps in this data that are already handled | [Known gotchas already handled](#known-gotchas-already-handled) |
+
+Three claims carry the project, and each is measured rather than asserted:
+prices agree with a second publisher on every interval compared, the cost figure
+agrees with the system operator's own published rent to within five thousandths
+of a percent, and no figure reaches a reader without having been matched back
+against the document it came from. The dashboard recomputes all three on every
+run, so the current values are on the page rather than in this file.
+
 ## The thing being measured
 
 ![Market splitting on the Iberian border](images_readme/06-market-splitting.png)
@@ -228,7 +255,7 @@ python -m pytest tests/ -q
 python scripts/run_market_splitting.py --demo
 ```
 
-541 tests, about fifteen seconds, no network and no credentials. The demo plants
+554 tests, about fifteen seconds, no network and no credentials. The demo plants
 two known splits in a synthetic week, so the output is verifiable by eye before
 real data arrives.
 
@@ -289,8 +316,10 @@ is only answerable on a day when the zones actually priced apart.
 multiplied by the energy that crossed the border while the zones priced apart,
 computed from ENTSO-E prices and schedules. REE publishes the congestion rent on
 the same border as ESIOS indicator 599, and `gold_cost_validation` compares them
-per market day. Over 367 market days this project totals 27,720,655 EUR against
-REE's 27,721,890 EUR, a difference of **-0.0045%**.
+per market day. Over a year of market days the two agree to within **five
+thousandths of a percent**. The totals themselves grow daily, so they live on
+the dashboard, which recomputes them on every run, rather than in a file that
+would be stale a week after it was written.
 
 The comparison is rent against rent, and that took a correction. An earlier
 version compared REE's rent to `extra_cost_eur`, which counts the import
