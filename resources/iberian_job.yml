@@ -101,6 +101,18 @@ resources:
               # document, so it lands as a new row rather than replacing the
               # old one, which is what keeps the point in time filter honest.
               days: "3"
+              # The shared Vector Search endpoint this index lived on was
+              # withdrawn when the course that owned it ended, and the endpoint
+              # is not ours to recreate. Landing the notices still works and is
+              # the part that matters: they are in the lakehouse, queryable and
+              # in lineage, which is what this task was added for. Only the
+              # sync is skipped, so the task goes green and the daily run stops
+              # failing on a resource that no longer exists.
+              #
+              # Back to "yes" if an endpoint is available again. Nothing else
+              # has to change: the index name, the source table and the sync
+              # call are all still here.
+              sync_index: "no"
           environment_key: Default
 
           # After ingest rather than beside it, so two tasks are not hitting a
